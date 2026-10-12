@@ -102,3 +102,12 @@ def test_recommendations_no_match_is_200_with_message(client):
 )
 def test_invalid_requests_return_422(client, payload):
     assert client.post("/api/recommendations", json=payload).status_code == 422
+
+
+def test_explain_endpoint(client):
+    prefs = {"genres": ["Crime", "Thriller"], "moods": ["Dark"]}
+    top = client.post("/api/recommendations", json=prefs).json()["recommendations"][0]
+    body = client.post(f"/api/movies/{top['movie_id']}/explain", json=prefs).json()
+    assert body["rank"] == 1 and body["score"] == top["score"] and body["passes_filters"]
+    assert client.post("/api/movies/99999/explain", json=prefs).status_code == 404
+    assert client.post(f"/api/movies/{SE7EN}/explain", json={}).status_code == 422

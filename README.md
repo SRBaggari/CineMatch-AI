@@ -16,8 +16,9 @@ All processing runs locally. The project uses no paid APIs, API keys, external A
 | Weighted preference matching | Configurable weights for genre, language, mood, keyword, and year, normalised over the components in use |
 | Ranking | Top 10 by default, hard filters, duplicate removal, an explained empty result, deterministic tie-breaking |
 | Explainable AI | Title, relevance score, matched genres and preferences, reasons ordered by contribution, and per-component scores |
-| API | FastAPI with Pydantic validation: preference options, movie list and details, recommendations, similar movies |
-| Testing | 65 pytest tests covering scoring maths, engine behaviour on a synthetic fixture, and the API on the real dataset |
+| API | FastAPI with Pydantic validation: preference options, movie list and details, recommendations, per-movie explanation, similar movies |
+| Frontend | Multi-page React app: Home, Preferences (6-step wizard), Recommendations, Movie Details, How It Works ([section 9](#9-frontend)) |
+| Testing | 69 pytest tests covering scoring maths, engine behaviour on a synthetic fixture, and the API on the real dataset |
 
 ---
 
@@ -25,7 +26,7 @@ All processing runs locally. The project uses no paid APIs, API keys, external A
 
 | Layer | Technology |
 |---|---|
-| Frontend | React 19, Vite 8, JavaScript, modern CSS, Lucide React icons |
+| Frontend | React 19, React Router 7, Vite 8, JavaScript, plain CSS (no Tailwind), Lucide React icons |
 | Backend | Python 3.10+, FastAPI, Uvicorn, Pydantic v2 |
 | ML / data | Pandas, NumPy, SciPy, scikit-learn (`TfidfVectorizer`, `MultiLabelBinarizer`, `cosine_similarity`) |
 | Dataset | Local CSV (`backend/data/movies.csv`) |
@@ -35,8 +36,8 @@ All processing runs locally. The project uses no paid APIs, API keys, external A
 
 ```
 ┌──────────────────────────── Browser (React + Vite) ────────────────────────────┐
-│  PreferencePanel ─► App state ─► api/client.js ─► fetch('/api/...')            │
-│  TasteProfile · MovieCard · ScoreBreakdown · MovieModal (similar movies)       │
+│  Routes: / · /preferences · /recommendations · /movies/:id · /how-it-works     │
+│  AppContext (options, saved preferences, cached results) ─► api/client.js      │
 └───────────────────────────────────────┬────────────────────────────────────────┘
                                         │  Vite dev proxy  /api → 127.0.0.1:8000
 ┌───────────────────────────────────────▼────────────────────────────────────────┐
@@ -78,13 +79,20 @@ CineMatch-AI/
 ├── frontend/
 │   ├── vite.config.js         # dev server + /api proxy (API_TARGET env var)
 │   └── src/
-│       ├── App.jsx            # state, payload building, page layout
-│       ├── api/client.js      # backend API wrapper
-│       ├── utils/             # genre styling, component labels
+│       ├── main.jsx           # BrowserRouter + AppProvider + styles
+│       ├── App.jsx            # route table
+│       ├── api/client.js      # backend API wrapper (typed errors)
+│       ├── context/AppContext.jsx  # options, persisted preferences, cached results
+│       ├── pages/             # Home, Preferences, Results, MovieDetails, HowItWorks, NotFound
+│       ├── components/
+│       │   ├── layout/        # Navbar (mobile menu), Footer, Layout (offline banner)
+│       │   ├── ui/            # Poster, ScoreRing, ChipSelector, MultiSelectDropdown,
+│       │   │                  # RangeSlider, Toggle, Feedback (spinner/empty/error/skeleton)
+│       │   ├── movies/        # RecommendationCard, MovieTile, ScoreBreakdown, FilterReport
+│       │   └── preferences/   # Stepper, KeywordInput, MovieSearch
+│       ├── utils/             # prefs (payload/validation), storage, genres, moods, tfidf demo
 │       ├── hooks/useDebounce.js
-│       ├── styles.css
-│       └── components/        # PreferencePanel, MovieCard, ScoreBreakdown, TasteProfile,
-│                              # MovieModal, ScoreRing, Poster, HowItWorks, …
+│       └── styles/            # tokens, base, layout, components, pages (.css)
 ├── docs/ALGORITHM.md          # detailed algorithm + worked example
 ├── scripts/                   # Windows PowerShell setup/start helpers
 └── README.md
@@ -146,6 +154,7 @@ Interactive docs are at **http://127.0.0.1:8000/docs** when the backend is runni
 | GET | `/api/movies?search=&genre=&language=&limit=&offset=` | Paginated movie list: `{total, limit, offset, items}` |
 | GET | `/api/movies/{id}` | Movie details (404 if unknown) |
 | GET | `/api/movies/{id}/similar?top_n=` | Item-to-item similarity |
+| POST | `/api/movies/{id}/explain` | Score, components, reasons, and rank of **one** movie for the given preferences (same body as `/recommendations`); `rank` is `null` and `filtered_by` lists the reason when a hard filter removes it |
 | POST | `/api/recommendations` | Ranked, explained recommendations |
 
 Request (all fields optional, but at least one preference is required; unknown fields are rejected):
@@ -242,3 +251,19 @@ cd frontend
 npm run build      # outputs frontend/dist
 npm run preview    # serves the build on http://localhost:4173 (still proxies /api)
 ```
+
+## 9. Frontend
+
+| Route | Page | What it does |
+|---|---|---|
+| `/` | Home | Hero ("Discover Movies Made for You"), Get Started, catalogue stats, featured highest-rated movie and a scrollable row (clearly labelled *not* personalised), How It Works preview |
+| `/preferences` | Preferences | 6-step wizard with a progress stepper: genre chips → language dropdown (+ strict toggle) → mood selection cards → themes and liked movies → era cards, dual year slider, rating slider, result-count dropdown → review with editable weights and **Generate My Recommendations** |
+| `/recommendations` | Results | Calls `POST /api/recommendations`. Shows the weights used, a filter funnel, a sort dropdown (default: match score), and cards with title, genres, rating, year, description, match score, reasons, and **View Details** |
+| `/movies/:id` | Movie details | Movie info, genres, moods, keywords, credits, a match explanation from `POST /api/movies/{id}/explain` (rank, reasons, component breakdown), and similar movies |
+| `/how-it-works` | How It Works | Beginner-friendly explanations of content-based filtering, TF-IDF, cosine similarity, weighted matching, and ranking, with live mini-demos |
+
+* **Data:** every personalised result comes from the backend. Nothing is hard-coded. The How It Works demos use small labelled teaching examples.
+* **Persistence:** preferences are saved to `localStorage` (`cinematch.preferences.v2`) and checked against the current catalogue on load. If storage is unavailable, the app still works.
+* **States:** skeleton loaders while scoring, an offline banner with retry when the backend is unreachable, error panels with retry, and empty states for no preferences, no matches (with the filter funnel), and unknown movie or page.
+* **Responsive:** tested at 1440 px desktop, 820 px tablet, and 390 px phone widths with no horizontal scrolling. On narrow screens the navbar collapses to a menu.
+* **Design:** black and charcoal surfaces, a purple-to-blue gradient accent, glass panels, rounded cards, and hover lift animations. Animations are reduced when the OS asks for reduced motion. Posters are generated from genre colours, with no external image service.

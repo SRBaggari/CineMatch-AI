@@ -2,6 +2,13 @@
 // and requests go through the Vite proxy (see vite.config.js).
 const BASE_URL = (import.meta.env.VITE_API_URL || '').replace(/\/$/, '');
 
+export class ApiError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
 async function request(path, options = {}) {
   let response;
   try {
@@ -10,7 +17,7 @@ async function request(path, options = {}) {
       ...options,
     });
   } catch {
-    throw new Error('Cannot reach the recommendation server. Is the backend running?');
+    throw new ApiError('Cannot reach the CineMatch AI server. Make sure the backend is running.', 0);
   }
 
   if (!response.ok) {
@@ -22,17 +29,21 @@ async function request(path, options = {}) {
     } catch {
       /* keep the generic message */
     }
-    throw new Error(message);
+    throw new ApiError(message, response.status);
   }
   return response.json();
 }
+
+const post = (path, body) => request(path, { method: 'POST', body: JSON.stringify(body) });
 
 export const api = {
   health: () => request('/health'),
   dataset: () => request('/dataset'),
   options: () => request('/preferences/options'),
-  searchMovies: (search, limit = 8) =>
-    request(`/movies?${new URLSearchParams({ search, limit: String(limit) })}`).then((page) => page.items),
+  listMovies: (params = {}) => request(`/movies?${new URLSearchParams(params)}`),
+  searchMovies: (search, limit = 8) => api.listMovies({ search, limit: String(limit) }).then((page) => page.items),
+  getMovie: (movieId) => request(`/movies/${movieId}`),
   similar: (movieId, topN = 6) => request(`/movies/${movieId}/similar?top_n=${topN}`),
-  recommend: (payload) => request('/recommendations', { method: 'POST', body: JSON.stringify(payload) }),
+  recommend: (payload) => post('/recommendations', payload),
+  explain: (movieId, payload) => post(`/movies/${movieId}/explain`, payload),
 };

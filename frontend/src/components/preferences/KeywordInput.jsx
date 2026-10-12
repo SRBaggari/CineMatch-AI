@@ -10,16 +10,17 @@ export default function KeywordInput({ keywords, suggestions, onAdd, onRemove })
     setValue('');
   };
 
-  const unused = suggestions.filter((s) => !keywords.includes(s)).slice(0, 14);
+  const unused = suggestions.filter((s) => !keywords.includes(s)).slice(0, 18);
 
   return (
     <div className="keyword-input">
-      <div className="input-with-icon">
-        <Tag size={16} />
+      <div className="input-shell">
+        <Tag size={17} />
         <input
           type="text"
           value={value}
-          placeholder="Add a theme, e.g. time travel"
+          maxLength={60}
+          placeholder="Type a theme, e.g. time travel, and press Enter"
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
@@ -27,17 +28,17 @@ export default function KeywordInput({ keywords, suggestions, onAdd, onRemove })
               submit();
             }
           }}
-          aria-label="Add keyword"
+          aria-label="Add a movie theme"
         />
-        <button type="button" className="icon-button" onClick={submit} aria-label="Add keyword">
-          <Plus size={16} />
+        <button type="button" className="icon-btn" onClick={submit} aria-label="Add theme" disabled={!value.trim()}>
+          <Plus size={18} />
         </button>
       </div>
 
       {keywords.length > 0 && (
-        <div className="liked-list">
+        <div className="pill-row">
           {keywords.map((k) => (
-            <span key={k} className="liked-pill keyword-pill">
+            <span key={k} className="pill pill-accent">
               {k}
               <button type="button" onClick={() => onRemove(k)} aria-label={`Remove ${k}`}>
                 <X size={12} />
@@ -47,10 +48,11 @@ export default function KeywordInput({ keywords, suggestions, onAdd, onRemove })
         </div>
       )}
 
+      <p className="field-label">Popular themes in the catalogue</p>
       <div className="suggestions">
         {unused.map((s) => (
           <button key={s} type="button" className="suggestion" onClick={() => onAdd(s)}>
-            + {s}
+            <Plus size={12} /> {s}
           </button>
         ))}
       </div>

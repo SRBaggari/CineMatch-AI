@@ -13,6 +13,7 @@ from .schemas import (
     DatasetInfo,
     HealthResponse,
     Movie,
+    MovieExplanation,
     MovieList,
     PreferenceOptions,
     RecommendationRequest,
@@ -80,8 +81,19 @@ def similar_movies(
 @router.post("/recommendations", response_model=RecommendationResponse, tags=["recommendations"])
 def recommend(payload: RecommendationRequest, engine: RecommendationEngine = Depends(get_engine)):
     """Ranked, explained recommendations for the submitted preferences."""
-    data = payload.model_dump()
     try:
-        return engine.recommend(UserPreferences(**data))
+        return engine.recommend(UserPreferences(**payload.model_dump()))
     except (EmptyPreferencesError, InvalidPreferenceError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/movies/{movie_id}/explain", response_model=MovieExplanation, tags=["recommendations"])
+def explain_movie(movie_id: int, payload: RecommendationRequest, engine: RecommendationEngine = Depends(get_engine)):
+    """Score breakdown and reasons for one movie under the submitted preferences."""
+    try:
+        result = engine.explain(UserPreferences(**payload.model_dump()), movie_id)
+    except (EmptyPreferencesError, InvalidPreferenceError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Movie {movie_id} not found")
+    return result

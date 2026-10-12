@@ -112,6 +112,16 @@ class Recommendation(BaseModel):
     similar_to: SimilarLiked | None = None
 
 
+class MovieExplanation(Recommendation):
+    """How one movie scores against the preferences, even if it is not in the top N."""
+
+    rank: int | None = Field(description="Position in the full ranking, or null if a hard filter removes it")
+    passes_filters: bool
+    filtered_by: list[str] = Field(description="Hard filters that remove this movie")
+    candidates: int = Field(description="Number of movies that pass every filter")
+    weights: dict[str, float]
+
+
 class ProfileTerm(BaseModel):
     term: str
     weight: float

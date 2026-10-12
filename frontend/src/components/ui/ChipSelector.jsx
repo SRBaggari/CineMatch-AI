@@ -1,8 +1,8 @@
 import { Check } from 'lucide-react';
 
-export default function ChipSelector({ options, selected, onToggle, counts, iconFor }) {
+export default function ChipSelector({ options, selected, onToggle, counts, iconFor, label }) {
   return (
-    <div className="chip-group">
+    <div className="chip-group" role="group" aria-label={label}>
       {options.map((option) => {
         const active = selected.includes(option);
         const Icon = iconFor?.(option);
@@ -10,12 +10,12 @@ export default function ChipSelector({ options, selected, onToggle, counts, icon
           <button
             key={option}
             type="button"
-            className={`chip ${active ? 'chip-active' : ''}`}
+            className={`chip ${active ? 'is-active' : ''}`}
             aria-pressed={active}
             onClick={() => onToggle(option)}
           >
-            {active ? <Check size={14} /> : Icon && <Icon size={14} />}
-            {option}
+            {active ? <Check size={15} strokeWidth={2.6} /> : Icon && <Icon size={15} />}
+            <span>{option}</span>
             {counts && <span className="chip-count">{counts[option]}</span>}
           </button>
         );

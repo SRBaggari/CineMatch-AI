@@ -1,0 +1,282 @@
+/* ---------------------------------------------------------------- shell */
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(900px 520px at 8% -10%, rgba(168, 85, 247, 0.22), transparent 60%),
+    radial-gradient(800px 500px at 100% 0%, rgba(59, 130, 246, 0.18), transparent 60%),
+    radial-gradient(700px 600px at 50% 120%, rgba(99, 102, 241, 0.12), transparent 60%),
+    linear-gradient(180deg, var(--bg) 0%, var(--bg-2) 100%);
+}
+
+.main {
+  flex: 1;
+}
+
+.page {
+  /* Only vertical padding: pages are often also .container, which owns the side padding. */
+  padding-top: 40px;
+  padding-bottom: 72px;
+  animation: fade-up 0.5s var(--ease) both;
+}
+
+.page-head {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  align-self: flex-start;
+  padding: 5px 12px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-soft);
+  border: 1px solid rgba(168, 85, 247, 0.28);
+  color: #d8b4fe;
+  font-size: 0.78rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.lead {
+  font-size: clamp(1rem, 1.6vw, 1.15rem);
+  color: var(--text-2);
+  max-width: 680px;
+}
+
+.section {
+  padding-top: 56px;
+}
+
+.section-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 22px;
+}
+
+.section-head > div {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.section-note {
+  max-width: 380px;
+}
+
+/* ---------------------------------------------------------------- navbar */
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  height: var(--nav-height);
+  transition: background 0.3s, border-color 0.3s;
+  border-bottom: 1px solid transparent;
+}
+
+.navbar.is-scrolled,
+.navbar.is-open {
+  background: rgba(7, 7, 12, 0.72);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border-bottom-color: var(--border);
+}
+
+.navbar-inner {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1.15rem;
+  letter-spacing: -0.01em;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  background: var(--gradient);
+  color: #fff;
+  box-shadow: var(--glow);
+}
+
+.brand-mark.small {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+}
+
+.nav-links {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.nav-links a {
+  padding: 8px 14px;
+  border-radius: var(--radius-pill);
+  color: var(--text-2);
+  font-size: 0.92rem;
+  font-weight: 500;
+  transition: color 0.2s, background 0.2s;
+}
+
+.nav-links a:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.nav-links a.is-active {
+  color: var(--text);
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1px rgba(168, 85, 247, 0.35);
+}
+
+.navbar .nav-toggle {
+  display: none;
+  margin-left: auto;
+}
+
+.mobile-menu {
+  display: none;
+}
+
+@media (max-width: 880px) {
+  .navbar .nav-links,
+  .navbar .nav-cta {
+    display: none;
+  }
+
+  .navbar .nav-toggle {
+    display: grid;
+  }
+
+  .mobile-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin: 0 16px;
+    padding: 14px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border-strong);
+    background: #0f0f18;
+    box-shadow: var(--shadow);
+    animation: fade-up 0.25s var(--ease) both;
+  }
+
+  .mobile-menu a:not(.btn) {
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    color: var(--text-2);
+    font-weight: 500;
+  }
+
+  .mobile-menu a.is-active {
+    color: var(--text);
+    background: var(--accent-soft);
+  }
+
+  .mobile-menu .btn {
+    margin-top: 6px;
+  }
+}
+
+/* ---------------------------------------------------------------- offline banner */
+.offline-banner {
+  background: rgba(251, 113, 133, 0.1);
+  border-bottom: 1px solid rgba(251, 113, 133, 0.35);
+  color: #fecdd3;
+  font-size: 0.9rem;
+}
+
+.offline-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.offline-inner span {
+  flex: 1;
+}
+
+@media (max-width: 640px) {
+  .offline-inner {
+    flex-wrap: wrap;
+  }
+}
+
+/* ---------------------------------------------------------------- footer */
+.footer {
+  margin-top: 40px;
+  padding: 32px 0 36px;
+  border-top: 1px solid var(--border);
+  background: rgba(7, 7, 12, 0.6);
+}
+
+.footer-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.footer-links {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+
+.footer-links a {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.footer-links a:hover {
+  color: var(--text);
+}
+
+.provenance {
+  margin-top: 20px;
+  font-size: 0.78rem;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.provenance strong {
+  color: var(--text-2);
+}

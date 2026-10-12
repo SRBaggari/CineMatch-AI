@@ -243,3 +243,26 @@ def test_similar_movies_ranks_identical_content_first(engine):
     assert [s["movie"]["movie_id"] for s in similar[:2]] == [6, 7]
     assert similar[0]["similarity"] == pytest.approx(1.0)
     assert engine.similar_movies(12345) is None
+
+
+# ------------------------------------------------------------- single-movie explanation
+def test_explain_matches_recommend_for_ranked_movies(engine):
+    prefs = UserPreferences(**SCI_FI_PREFS, top_n=50)
+    for rec in engine.recommend(prefs)["recommendations"]:
+        explained = engine.explain(prefs, rec["movie_id"])
+        assert explained["rank"] == rec["rank"]
+        assert explained["score"] == rec["score"]
+        assert explained["components"] == rec["components"]
+        assert explained["passes_filters"] and explained["filtered_by"] == []
+
+
+def test_explain_reports_filtered_out_movie(engine):
+    prefs = UserPreferences(genres=["Science Fiction"], min_rating=7.5)
+    explained = engine.explain(prefs, 2)  # Genre Only, rated 7.0
+    assert explained["rank"] is None and not explained["passes_filters"]
+    assert explained["filtered_by"] == ["Rated below your minimum of 7.5"]
+    assert explained["components"]["genre"]["value"] == pytest.approx(1.0)  # still scored
+
+
+def test_explain_unknown_movie_returns_none(engine):
+    assert engine.explain(UserPreferences(genres=["Comedy"]), 999) is None

@@ -336,7 +336,8 @@ class RecommendationEngine:
     # ------------------------------------------------------------------ #
     # Steps 3-6: scoring, filtering, ranking, explanation
     # ------------------------------------------------------------------ #
-    def recommend(self, prefs: UserPreferences) -> dict:
+    def _score_all(self, prefs: UserPreferences) -> dict:
+        """Resolve preferences and compute every component score for every movie."""
         warnings: list[str] = []
         genres = self._resolve_labels("genre", prefs.genres)
         moods = self._resolve_labels("mood", prefs.moods)
@@ -402,50 +403,106 @@ class RecommendationEngine:
             others = any(v for c, v in active.items() if c != component)
             if strict and active[component] and others:
                 active[component] = False
-        base_weights = {**self.score_weights, **(prefs.weights or {})}
+
         profile = self._profile_summary(
             target_genres, target_moods, target_languages, keywords, liked, prefs,
             genres_inferred, moods_inferred, text_profile, active, None,
         )
+        if any(active.values()):
+            weights = normalize_weights({**self.score_weights, **(prefs.weights or {})}, active)
+            profile["weights"] = {c: round(w, 4) for c, w in weights.items()}
+            final = np.round(sum(weights[c] * scores[c] for c in COMPONENTS), SCORE_DECIMALS)
+        else:
+            weights = {c: 0.0 for c in COMPONENTS}
+            final = np.zeros(len(self.movies))
 
-        if not any(active.values()):
+        return {
+            "prefs": prefs, "warnings": warnings, "keywords": keywords, "liked": liked, "excluded": excluded,
+            "has_year_pref": has_year_pref, "target_genres": target_genres, "target_moods": target_moods,
+            "target_languages": target_languages, "genres_inferred": genres_inferred,
+            "moods_inferred": moods_inferred, "text_profile": text_profile, "scores": scores,
+            "raw_scores": raw_scores, "active": active, "weights": weights, "final": final, "profile": profile,
+        }
+
+    def _filter(self, ctx: dict) -> tuple[np.ndarray, dict, list[tuple[str, np.ndarray]]]:
+        """Apply hard filters. Returns the mask, the per-step counts and each step's own mask."""
+        prefs = ctx["prefs"]
+        mask = np.ones(len(self.movies), dtype=bool)
+        report = {"total": int(mask.sum())}
+        steps: list[tuple[str, np.ndarray]] = []
+
+        def apply(key: str, label: str, step_mask: np.ndarray) -> None:
+            nonlocal mask
+            steps.append((label, step_mask))
+            mask &= step_mask
+            report[key] = int(mask.sum())
+
+        if prefs.min_rating > 0:
+            apply("after_min_rating", f"Rated below your minimum of {prefs.min_rating:g}",
+                  self.ratings >= prefs.min_rating)
+        if prefs.strict_years and ctx["has_year_pref"]:
+            lo = prefs.year_min if prefs.year_min is not None else -10**9
+            hi = prefs.year_max if prefs.year_max is not None else 10**9
+            apply("after_year_range", "Released outside your strict year range",
+                  (self.years >= lo) & (self.years <= hi))
+        if prefs.strict_languages and ctx["target_languages"]:
+            apply("after_languages", "Not in one of your strict languages",
+                  np.isin(self.movies["language"].to_numpy(), list(ctx["target_languages"])))
+        if ctx["liked"] or ctx["excluded"]:
+            keep = np.ones(len(self.movies), dtype=bool)
+            keep[ctx["liked"] + ctx["excluded"]] = False
+            apply("after_exclusions", "You already marked this movie as liked or excluded", keep)
+        apply("with_positive_score", "Does not match any of your preferences", ctx["final"] > 0)
+        return mask, report, steps
+
+    def _ranked(self, ctx: dict, mask: np.ndarray) -> np.ndarray:
+        """Deterministic ranking: score desc, rating desc, movie_id asc."""
+        candidates = np.where(mask)[0]
+        order = np.lexsort((self.ids[candidates], -self.ratings[candidates], -ctx["final"][candidates]))
+        return candidates[order]
+
+    def _build_item(self, i: int, ctx: dict, rank: int | None) -> dict:
+        scores, weights, active = ctx["scores"], ctx["weights"], ctx["active"]
+        components = {
+            c: {
+                "value": round(float(scores[c][i]), 4),
+                "raw": round(float(ctx["raw_scores"][c][i]), 4),
+                "weight": round(weights[c], 4),
+                "contribution": round(float(weights[c] * scores[c][i]), 4),
+                "active": active[c],
+            }
+            for c in COMPONENTS
+        }
+        matched = self._matched(i, ctx["target_genres"], ctx["target_moods"], ctx["target_languages"],
+                                ctx["keywords"], ctx["prefs"], ctx["has_year_pref"])
+        text_profile = ctx["text_profile"]
+        return {
+            "rank": rank,
+            "movie_id": int(self.ids[i]),
+            "title": self.movies.iloc[i]["title"],
+            "movie": self.movie_to_dict(i),
+            "score": round(float(ctx["final"][i]), 4),
+            "components": components,
+            "matched": matched,
+            "reasons": self._reasons(i, components, matched, ctx["liked"], ctx["prefs"], ctx["target_genres"],
+                                     ctx["target_moods"], ctx["genres_inferred"], ctx["moods_inferred"]),
+            "top_terms": self._shared_terms(text_profile, i) if text_profile is not None else [],
+            "similar_to": self._similar_liked(i, ctx["liked"]),
+        }
+
+    def recommend(self, prefs: UserPreferences) -> dict:
+        ctx = self._score_all(prefs)
+        profile, warnings = ctx["profile"], ctx["warnings"]
+        if not any(ctx["active"].values()):
             return self._empty_result(
                 profile, warnings, {"total": len(self.movies)},
                 "None of your preferences match anything in the catalogue.",
             )
 
-        weights = normalize_weights(base_weights, active)
-        profile["weights"] = {c: round(w, 4) for c, w in weights.items()}
-        final = sum(weights[c] * scores[c] for c in COMPONENTS)
-        final = np.round(final, SCORE_DECIMALS)
-
-        # --- hard filters -----------------------------------------------------
-        mask = np.ones(len(self.movies), dtype=bool)
-        report = {"total": int(mask.sum())}
-        if prefs.min_rating > 0:
-            mask &= self.ratings >= prefs.min_rating
-            report["after_min_rating"] = int(mask.sum())
-        if prefs.strict_years and has_year_pref:
-            lo = prefs.year_min if prefs.year_min is not None else -10**9
-            hi = prefs.year_max if prefs.year_max is not None else 10**9
-            mask &= (self.years >= lo) & (self.years <= hi)
-            report["after_year_range"] = int(mask.sum())
-        if prefs.strict_languages and target_languages:
-            mask &= np.isin(self.movies["language"].to_numpy(), list(target_languages))
-            report["after_languages"] = int(mask.sum())
-        if liked or excluded:
-            mask[liked + excluded] = False
-            report["after_exclusions"] = int(mask.sum())
-        mask &= final > 0
-        report["with_positive_score"] = int(mask.sum())
-
-        candidates = np.where(mask)[0]
-        if len(candidates) == 0:
+        mask, report, _ = self._filter(ctx)
+        ranked = self._ranked(ctx, mask)[: prefs.top_n]
+        if len(ranked) == 0:
             return self._empty_result(profile, warnings, report, self._no_match_message(report, prefs))
-
-        # --- deterministic ranking: score desc, rating desc, movie_id asc --------
-        order = np.lexsort((self.ids[candidates], -self.ratings[candidates], -final[candidates]))
-        ranked = candidates[order][: prefs.top_n]
 
         recommendations, seen = [], set()
         for i in ranked:
@@ -453,30 +510,7 @@ class RecommendationEngine:
             if movie_id in seen:  # defensive: indices are unique, but never emit duplicates
                 continue
             seen.add(movie_id)
-            components = {
-                c: {
-                    "value": round(float(scores[c][i]), 4),
-                    "raw": round(float(raw_scores[c][i]), 4),
-                    "weight": round(weights[c], 4),
-                    "contribution": round(float(weights[c] * scores[c][i]), 4),
-                    "active": active[c],
-                }
-                for c in COMPONENTS
-            }
-            matched = self._matched(i, target_genres, target_moods, target_languages, keywords, prefs, has_year_pref)
-            recommendations.append({
-                "rank": len(recommendations) + 1,
-                "movie_id": movie_id,
-                "title": self.movies.iloc[i]["title"],
-                "movie": self.movie_to_dict(i),
-                "score": round(float(final[i]), 4),
-                "components": components,
-                "matched": matched,
-                "reasons": self._reasons(i, components, matched, liked, prefs,
-                                         target_genres, target_moods, genres_inferred, moods_inferred),
-                "top_terms": self._shared_terms(text_profile, i) if text_profile is not None else [],
-                "similar_to": self._similar_liked(i, liked),
-            })
+            recommendations.append(self._build_item(i, ctx, len(recommendations) + 1))
 
         return {
             "recommendations": recommendations,
@@ -486,6 +520,26 @@ class RecommendationEngine:
             "message": None,
             "warnings": warnings,
         }
+
+    def explain(self, prefs: UserPreferences, movie_id: int) -> dict | None:
+        """Score one movie against the preferences, whether or not it makes the top N.
+
+        Uses exactly the same scoring, filters and ranking as recommend(); `rank` is the
+        movie's position in the full ranking, or None when a hard filter removes it.
+        """
+        i = self.id_to_index.get(int(movie_id))
+        if i is None:
+            return None
+        ctx = self._score_all(prefs)
+        mask, _, steps = self._filter(ctx)
+        ranked = self._ranked(ctx, mask)
+        positions = {int(idx): pos + 1 for pos, idx in enumerate(ranked)}
+        item = self._build_item(i, ctx, positions.get(i))
+        item["passes_filters"] = bool(mask[i])
+        item["filtered_by"] = [label for label, step_mask in steps if not step_mask[i]]
+        item["candidates"] = int(len(ranked))
+        item["weights"] = {c: round(w, 4) for c, w in ctx["weights"].items()}
+        return item
 
     # ------------------------------------------------------------------ #
     # Result helpers
