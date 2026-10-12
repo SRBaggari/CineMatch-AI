@@ -312,7 +312,7 @@ CineMatch-AI/
 **Prerequisites**
 
 * **Python 3.10 or newer** ([python.org](https://www.python.org/downloads/))
-* **Node.js 20 or newer** ([nodejs.org](https://nodejs.org/))
+* **Node.js 22.12 or newer** ([nodejs.org](https://nodejs.org/)). Vite 8 needs 20.19+ or 22.12+, and the Vitest test runner needs 22.12+. The current LTS release works.
 * Windows PowerShell (the commands below use it)
 
 Clone the repository:

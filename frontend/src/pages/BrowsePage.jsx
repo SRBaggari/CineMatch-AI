@@ -58,7 +58,8 @@ export default function BrowsePage() {
   const [retry, setRetry] = useState(0);
   const debouncedQuery = useDebounce(query.trim(), 250);
 
-  const yearRange = years ?? (options ? [options.year_min, options.year_max] : null);
+  // Memoised so the filters below are only rebuilt when the range actually changes.
+  const yearRange = useMemo(() => years ?? (options ? [options.year_min, options.year_max] : null), [years, options]);
   const usePrefs = personal && ready;
 
   const filters = useMemo(() => {
