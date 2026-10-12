@@ -1,6 +1,6 @@
 """Pydantic request / response models (they also drive the OpenAPI docs at /docs)."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
@@ -68,11 +68,55 @@ class RecommendationRequest(BaseModel):
     strict_languages: bool = Field(default=False, description="Treat languages as a hard filter")
     top_n: int = Field(default=DEFAULT_TOP_N, ge=1, le=MAX_TOP_N)
     weights: ScoreWeights | None = None
+    use_feedback: bool = Field(default=True, description="Adjust scores with saved likes, dislikes and favourites")
 
     @model_validator(mode="after")
     def check_year_range(self):
         if self.year_min is not None and self.year_max is not None and self.year_min > self.year_max:
             raise ValueError("year_min must be less than or equal to year_max")
+        return self
+
+    def engine_fields(self) -> dict:
+        """Fields understood by the engine's UserPreferences (excludes API-only flags)."""
+        return self.model_dump(exclude={"use_feedback"})
+
+
+class SearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    query: Annotated[str, StringConstraints(strip_whitespace=True, max_length=100)] = ""
+    genres: list[Label] = Field(default_factory=list, max_length=20)
+    languages: list[Label] = Field(default_factory=list, max_length=20)
+    year_min: int | None = Field(default=None, ge=1880, le=2100)
+    year_max: int | None = Field(default=None, ge=1880, le=2100)
+    sort: Literal["relevance", "rating", "year", "title"] = "relevance"
+    preferences: RecommendationRequest | None = Field(
+        default=None, description="When given, relevance = match score for these preferences"
+    )
+    limit: int = Field(default=24, ge=1, le=200)
+    offset: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def check_year_range(self):
+        if self.year_min is not None and self.year_max is not None and self.year_min > self.year_max:
+            raise ValueError("year_min must be less than or equal to year_max")
+        return self
+
+
+class FeedbackUpdate(BaseModel):
+    """Omitted fields are left unchanged; reaction=null clears a like/dislike."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reaction: Literal["like", "dislike"] | None = None
+    favorite: bool | None = None
+
+    @model_validator(mode="after")
+    def something_to_update(self):
+        if not self.model_fields_set:
+            raise ValueError("provide 'reaction' and/or 'favorite'")
+        if "favorite" in self.model_fields_set and self.favorite is None:
+            raise ValueError("favorite must be true or false")
         return self
 
 
@@ -99,17 +143,35 @@ class SimilarLiked(BaseModel):
     similarity: float
 
 
+class MovieRef(BaseModel):
+    movie_id: int
+    title: str
+
+
+class FeedbackEffect(BaseModel):
+    applied: bool = Field(description="False when there is no saved feedback or use_feedback is off")
+    adjustment: float = Field(description="FEEDBACK_WEIGHT × (liked_similarity − disliked_similarity)")
+    liked_similarity: float
+    closest_liked: MovieRef | None
+    disliked_similarity: float
+    closest_disliked: MovieRef | None
+
+
 class Recommendation(BaseModel):
     rank: int
     movie_id: int
     title: str
     movie: Movie
-    score: float = Field(description="Weighted relevance score in [0, 1]; not a probability")
+    base_score: float = Field(description="Preference-based score in [0, 1] (weighted sum of components)")
+    feedback_adjustment: float = Field(description="Change from saved feedback; 0 when none is applied")
+    score: float = Field(description="Final relevance score = clip(base + adjustment, 0, 1); not a probability")
     components: dict[str, ScoreComponent]
     matched: MatchedPreferences
+    summary: str = Field(description="One-sentence explanation built from the matched attributes")
     reasons: list[str]
     top_terms: list[str]
     similar_to: SimilarLiked | None = None
+    feedback: FeedbackEffect
 
 
 class MovieExplanation(Recommendation):
@@ -146,6 +208,7 @@ class UserProfile(BaseModel):
     top_terms: list[ProfileTerm]
     active_components: list[str]
     weights: dict[str, float]
+    feedback_applied: bool
 
 
 class RecommendationResponse(BaseModel):
@@ -199,6 +262,82 @@ class DatasetInfo(BaseModel):
     languages: int
     vocabulary_size: int
     year_range: list[int]
+
+
+class SearchItem(BaseModel):
+    movie: Movie
+    title_relevance: float | None
+    match_score: float | None
+    base_score: float | None
+    feedback_adjustment: float | None
+
+
+class SearchResponse(BaseModel):
+    total: int
+    limit: int
+    offset: int
+    sort: str
+    personalized: bool
+    items: list[SearchItem]
+
+
+class FeedbackItem(BaseModel):
+    movie_id: int
+    reaction: Literal["like", "dislike"] | None
+    favorite: bool
+    updated_at: str
+    movie: Movie
+
+
+class FeedbackList(BaseModel):
+    items: list[FeedbackItem]
+    counts: dict[str, int]
+
+
+class FeedbackState(BaseModel):
+    movie_id: int
+    reaction: Literal["like", "dislike"] | None
+    favorite: bool
+
+
+class HistogramBin(BaseModel):
+    label: str
+    start: float
+    end: float
+    count: int
+
+
+class DatasetAnalytics(BaseModel):
+    total_movies: int
+    genre_distribution: dict[str, int]
+    mood_distribution: dict[str, int]
+    language_distribution: dict[str, int]
+    decade_distribution: dict[str, int]
+    rating_distribution: list[HistogramBin]
+    average_rating: float
+    average_runtime: float
+    vocabulary_size: int
+    feature_source: str
+    score_cache: dict[str, int]
+
+
+class UsageAnalytics(BaseModel):
+    total_requests: int
+    recommendations_served: int
+    genre_selections: dict[str, int]
+    mood_selections: dict[str, int]
+    language_selections: dict[str, int]
+    keyword_selections: dict[str, int]
+    score_distribution: list[HistogramBin]
+    average_score: float | None
+    most_recommended: list[dict]
+
+
+class Analytics(BaseModel):
+    dataset: DatasetAnalytics
+    usage: UsageAnalytics
+    feedback: dict[str, int]
+    notes: list[str]
 
 
 class HealthResponse(BaseModel):

@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronDown, Info, Pencil, RefreshCw, SearchX, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { ChevronDown, Info, Pencil, RefreshCw, SearchX, SlidersHorizontal, Sparkles, ThumbsUp } from 'lucide-react';
 import FilterReport from '../components/movies/FilterReport.jsx';
 import RecommendationCard from '../components/movies/RecommendationCard.jsx';
 import { ErrorState, SkeletonCard, Spinner, StateMessage } from '../components/ui/Feedback.jsx';
+import Toggle from '../components/ui/Toggle.jsx';
 import { useApp } from '../context/AppContext.jsx';
 import { COMPONENTS, COMPONENT_INFO } from '../utils/components.js';
 import { hasYearPreference } from '../utils/prefs.js';
@@ -36,7 +37,8 @@ function PreferenceSummary({ prefs, options }) {
 }
 
 export default function ResultsPage() {
-  const { options, status, statusError, connect, prefs, ready, results, resultsCurrent, fetchRecommendations } = useApp();
+  const { options, status, statusError, connect, prefs, setPrefs, ready, results, resultsCurrent, fetchRecommendations, feedback, feedbackStale } = useApp();
+  const feedbackCount = Object.keys(feedback).length;
   const [sort, setSort] = useState('score');
 
   useEffect(() => {
@@ -144,6 +146,28 @@ export default function ResultsPage() {
                 </p>
               ))}
             </div>
+          </section>
+
+          <section className="feedback-bar glass" aria-label="Feedback personalisation">
+            <Toggle
+              checked={prefs.useFeedback}
+              onChange={(useFeedback) => setPrefs((p) => ({ ...p, useFeedback }))}
+              label="Personalise with my feedback"
+              description={
+                feedbackCount
+                  ? `${feedbackCount} movie${feedbackCount === 1 ? '' : 's'} rated. Likes and favourites boost similar movies; dislikes are hidden and demote similar ones.`
+                  : 'Like, dislike or save movies to fine-tune future rankings.'
+              }
+            />
+            {feedbackStale && (
+              <div className="rerank">
+                <ThumbsUp size={15} />
+                <span>Your feedback changed since these results were ranked.</span>
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => fetchRecommendations({ force: true })}>
+                  <RefreshCw size={14} /> Re-rank
+                </button>
+              </div>
+            )}
           </section>
 
           {sorted.length === 0 ? (

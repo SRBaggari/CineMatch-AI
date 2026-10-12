@@ -14,6 +14,7 @@ import {
   Users,
 } from 'lucide-react';
 import { api } from '../api/client.js';
+import FeedbackButtons from '../components/movies/FeedbackButtons.jsx';
 import MovieTile from '../components/movies/MovieTile.jsx';
 import ScoreBreakdown from '../components/movies/ScoreBreakdown.jsx';
 import { ErrorState, Spinner, StateMessage } from '../components/ui/Feedback.jsx';
@@ -39,7 +40,7 @@ function MatchPanel({ explanation, loading, error, ready }) {
       </div>
     );
   }
-  if (loading) {
+  if (loading && !explanation) {
     return (
       <div className="match-panel glass">
         <Spinner label="Scoring this movie against your preferences…" />
@@ -79,6 +80,8 @@ function MatchPanel({ explanation, loading, error, ready }) {
         </div>
       </div>
 
+      <p className="match-summary">{explanation.summary}</p>
+
       {highlights.length > 0 && (
         <div className="tag-row">
           {highlights.map((h) => (
@@ -103,7 +106,7 @@ function MatchPanel({ explanation, loading, error, ready }) {
         </p>
       )}
 
-      <ScoreBreakdown components={explanation.components} total={score} />
+      <ScoreBreakdown item={explanation} />
     </section>
   );
 }
@@ -112,7 +115,7 @@ export default function MovieDetailsPage() {
   const { movieId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { status, payload, ready } = useApp();
+  const { status, payload, ready, feedbackVersion } = useApp();
   const id = Number(movieId);
   const validId = Number.isInteger(id) && id > 0;
 
@@ -151,7 +154,8 @@ export default function MovieDetailsPage() {
       return undefined;
     }
     let cancelled = false;
-    setExplain({ data: null, loading: true, error: '' });
+    // Keep the current explanation on screen while re-scoring after a feedback change.
+    setExplain((s) => ({ data: s.data?.movie_id === id ? s.data : null, loading: true, error: '' }));
     api
       .explain(id, JSON.parse(payloadKey))
       .then((data) => !cancelled && setExplain({ data, loading: false, error: '' }))
@@ -159,7 +163,7 @@ export default function MovieDetailsPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, movieLoaded, ready, payloadKey]);
+  }, [id, movieLoaded, ready, payloadKey, feedbackVersion]);
 
   const goBack = () => (location.key !== 'default' ? navigate(-1) : navigate('/recommendations'));
   const { movie, similar, loading, error, notFound } = movieState;
@@ -210,6 +214,7 @@ export default function MovieDetailsPage() {
             <Poster movie={movie} size="xl" />
             <div className="details-info">
               <h1>{movie.title}</h1>
+              <FeedbackButtons movie={movie} showLabels />
               <div className="meta-row large">
                 <span>{movie.year}</span>
                 <span title="Approximate rating (unverified)">
@@ -273,7 +278,7 @@ export default function MovieDetailsPage() {
               <span className="eyebrow">More like this</span>
               <h2 id="similar-heading">Similar movies</h2>
             </div>
-            <p className="muted small section-note">Cosine similarity of the movies’ genre, mood, theme and language vectors.</p>
+            <p className="muted small section-note">Item-to-item cosine similarity of the movies’ cached genre, mood, theme and language vectors.</p>
           </div>
           <div className="similar-grid">
             {similar.map((item) => (

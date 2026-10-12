@@ -16,6 +16,7 @@ export function defaultPrefs(options) {
     strictYears: false,
     topN: options?.default_top_n ?? 10,
     weights: { ...(options?.default_weights ?? FALLBACK_WEIGHTS) },
+    useFeedback: true,
   };
 }
 
@@ -44,6 +45,7 @@ export function sanitizePrefs(saved, options) {
     strictYears: Boolean(saved.strictYears),
     topN: Number.isInteger(saved.topN) ? Math.min(options.max_top_n, Math.max(1, saved.topN)) : base.topN,
     weights: { ...base.weights, ...(saved.weights && typeof saved.weights === 'object' ? saved.weights : {}) },
+    useFeedback: saved.useFeedback !== false,
   };
 }
 
@@ -74,6 +76,7 @@ export function toPayload(prefs, options) {
     strict_languages: prefs.strictLanguages,
     top_n: prefs.topN,
     weights: prefs.weights,
+    use_feedback: prefs.useFeedback !== false,
   };
 }
 

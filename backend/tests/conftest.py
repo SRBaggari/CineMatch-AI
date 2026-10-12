@@ -1,10 +1,20 @@
-import pandas as pd
-import pytest
-from fastapi.testclient import TestClient
+import os
+import tempfile
+from pathlib import Path
 
-from app.data_loader import clean_movies
-from app.main import app
-from app.recommender import RecommendationEngine
+# Isolate tests from the real feedback database and feature cache. This must run
+# before `app` is imported, because app.config reads these variables at import time.
+_TEST_DIR = Path(tempfile.mkdtemp(prefix="cinematch-tests-"))
+os.environ["CINEMATCH_DB_PATH"] = str(_TEST_DIR / "test.db")
+os.environ["CINEMATCH_CACHE_DIR"] = ""
+
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
+
+from app.data_loader import clean_movies  # noqa: E402
+from app.main import app  # noqa: E402
+from app.recommender import RecommendationEngine  # noqa: E402
 
 # A tiny synthetic catalogue (not real films) with hand-checkable properties:
 #   1  matches the "sci-fi mind-bender" preferences on every component
@@ -52,3 +62,14 @@ def engine() -> RecommendationEngine:
 def client():
     with TestClient(app) as c:
         yield c
+
+
+@pytest.fixture
+def store(client):
+    """The API's SQLite store, emptied before and after each test that uses it."""
+    store = client.app.state.store
+    store.clear_feedback()
+    store.clear_usage()
+    yield store
+    store.clear_feedback()
+    store.clear_usage()

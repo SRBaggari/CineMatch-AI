@@ -167,7 +167,7 @@
   display: none;
 }
 
-@media (max-width: 880px) {
+@media (max-width: 1180px) {
   .navbar .nav-links,
   .navbar .nav-cta {
     display: none;

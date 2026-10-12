@@ -35,6 +35,15 @@ async function request(path, options = {}) {
 }
 
 const post = (path, body) => request(path, { method: 'POST', body: JSON.stringify(body) });
+const put = (path, body) => request(path, { method: 'PUT', body: JSON.stringify(body) });
+const del = async (path) => {
+  try {
+    const response = await fetch(`${BASE_URL}/api${path}`, { method: 'DELETE' });
+    if (!response.ok) throw new ApiError(`Request failed (${response.status})`, response.status);
+  } catch (e) {
+    throw e instanceof ApiError ? e : new ApiError('Cannot reach the CineMatch AI server.', 0);
+  }
+};
 
 export const api = {
   health: () => request('/health'),
@@ -46,4 +55,9 @@ export const api = {
   similar: (movieId, topN = 6) => request(`/movies/${movieId}/similar?top_n=${topN}`),
   recommend: (payload) => post('/recommendations', payload),
   explain: (movieId, payload) => post(`/movies/${movieId}/explain`, payload),
+  search: (payload) => post('/movies/search', payload),
+  analytics: () => request('/analytics'),
+  feedback: () => request('/feedback'),
+  setFeedback: (movieId, patch) => put(`/feedback/${movieId}`, patch),
+  clearFeedback: (movieId) => del(movieId ? `/feedback/${movieId}` : '/feedback'),
 };

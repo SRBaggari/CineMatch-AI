@@ -1,9 +1,30 @@
 """Central configuration for the CineMatch AI backend."""
 
+import os
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_PATH = BASE_DIR / "data" / "movies.csv"
+
+# Local SQLite database for user feedback and anonymous usage statistics.
+# Override with CINEMATCH_DB_PATH (the tests point it at a temporary file).
+DB_PATH = Path(os.environ.get("CINEMATCH_DB_PATH", BASE_DIR / "data" / "cinematch.db"))
+
+# Fitted TF-IDF model and similarity matrices are cached here, keyed by a hash of
+# the dataset, so a restart with unchanged data skips re-fitting. Override with
+# CINEMATCH_CACHE_DIR; set it to an empty string to disable the disk cache.
+_cache_env = os.environ.get("CINEMATCH_CACHE_DIR")
+FEATURE_CACHE_DIR = (
+    None if _cache_env == "" else Path(_cache_env) if _cache_env else BASE_DIR / "data" / ".cache"
+)
+FEATURE_CACHE_VERSION = 1  # bump when the feature pipeline changes
+
+# Number of distinct preference sets whose component scores are kept in memory.
+SCORE_CACHE_SIZE = 256
+
+# Feedback-based adjustment: final = base + FEEDBACK_WEIGHT * (sim_to_liked - sim_to_disliked),
+# clipped to [0, 1]. Liked and favourite movies both count as positive feedback.
+FEEDBACK_WEIGHT = 0.15
 
 APP_NAME = "CineMatch AI"
 APP_DESCRIPTION = (

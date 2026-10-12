@@ -7,6 +7,9 @@ const LINKS = [
   { to: '/', label: 'Home', end: true },
   { to: '/preferences', label: 'Preferences' },
   { to: '/recommendations', label: 'Recommendations' },
+  { to: '/browse', label: 'Browse' },
+  { to: '/my-list', label: 'My List' },
+  { to: '/analytics', label: 'Analytics' },
   { to: '/how-it-works', label: 'How It Works' },
 ];
 

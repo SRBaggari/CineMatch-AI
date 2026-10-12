@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import { Outlet, useLocation } from 'react-router-dom';
-import { RefreshCw, WifiOff } from 'lucide-react';
+import { RefreshCw, TriangleAlert, WifiOff, X } from 'lucide-react';
 import { useApp } from '../../context/AppContext.jsx';
 import Footer from './Footer.jsx';
 import Navbar from './Navbar.jsx';
@@ -16,7 +16,7 @@ function ScrollToTop() {
 }
 
 export default function Layout() {
-  const { status, statusError, connect } = useApp();
+  const { status, statusError, connect, notice, setNotice } = useApp();
   return (
     <div className="app-shell">
       <ScrollToTop />
@@ -39,6 +39,15 @@ export default function Layout() {
       <main className="main">
         <Outlet />
       </main>
+      {notice && (
+        <div className={`toast tone-${notice.tone}`} role="status">
+          <TriangleAlert size={17} />
+          <span>{notice.text}</span>
+          <button type="button" className="icon-btn" onClick={() => setNotice(null)} aria-label="Dismiss">
+            <X size={16} />
+          </button>
+        </div>
+      )}
       <Footer />
     </div>
   );

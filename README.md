@@ -16,9 +16,10 @@ All processing runs locally. The project uses no paid APIs, API keys, external A
 | Weighted preference matching | Configurable weights for genre, language, mood, keyword, and year, normalised over the components in use |
 | Ranking | Top 10 by default, hard filters, duplicate removal, an explained empty result, deterministic tie-breaking |
 | Explainable AI | Title, relevance score, matched genres and preferences, reasons ordered by contribution, and per-component scores |
-| API | FastAPI with Pydantic validation: preference options, movie list and details, recommendations, per-movie explanation, similar movies |
-| Frontend | Multi-page React app: Home, Preferences (6-step wizard), Recommendations, Movie Details, How It Works ([section 9](#9-frontend)) |
-| Testing | 69 pytest tests covering scoring maths, engine behaviour on a synthetic fixture, and the API on the real dataset |
+| API | FastAPI with Pydantic validation: preference options, movie list and details, recommendations, per-movie explanation, similar movies, search, feedback, analytics |
+| Feedback & personalisation | Like / dislike / favourite stored in local SQLite; a separate, bounded feedback adjustment re-ranks matching movies ([section 10](#10-feedback-search-analytics-and-performance)) |
+| Frontend | Multi-page React app: Home, Preferences (6-step wizard), Recommendations, Movie Details, Browse (search & filters), My List, Analytics, How It Works ([section 9](#9-frontend)) |
+| Testing | 118 pytest tests covering scoring maths, explanations, feedback, search, caching, the SQLite store, analytics, and the API |
 
 ---
 
@@ -64,7 +65,9 @@ CineMatch-AI/
 │   ├── app/
 │   │   ├── config.py          # paths, weights, year decay, dataset provenance
 │   │   ├── data_loader.py     # CSV loading, validation, cleaning, de-duplication
-│   │   ├── recommender.py     # RecommendationEngine + pure scoring helpers
+│   │   ├── recommender.py     # RecommendationEngine: features, caching, scoring, feedback, search
+│   │   ├── store.py           # SQLite: feedback + anonymous usage log
+│   │   ├── analytics.py       # analytics payload (dataset + logged usage)
 │   │   ├── schemas.py         # Pydantic request/response models
 │   │   ├── routes.py          # REST endpoints
 │   │   ├── main.py            # FastAPI app, startup, CORS
@@ -133,7 +136,8 @@ The loader checks that the required columns exist, coerces types, removes duplic
 | Year | release year | 1 inside range, −1/20 per year outside | 0.10 |
 
 ```
-score = Σ w'_c · s_c        where  w'_c = w_c / Σ_{active} w_k   (only components the user set)
+base  = Σ w'_c · s_c        where  w'_c = w_c / Σ_{active} w_k   (only components the user set)
+score = clip(base + feedback_adjustment, 0, 1)      (adjustment = 0 without saved feedback)
 ```
 
 * **Comparable components:** every component is in [0, 1], with 1 meaning a perfect match. Raw TF-IDF cosines are small (rarely above 0.5), so the keyword score is max-normalised: the best text match in the catalogue scores 1. The raw cosine is still returned.
@@ -155,7 +159,12 @@ Interactive docs are at **http://127.0.0.1:8000/docs** when the backend is runni
 | GET | `/api/movies/{id}` | Movie details (404 if unknown) |
 | GET | `/api/movies/{id}/similar?top_n=` | Item-to-item similarity |
 | POST | `/api/movies/{id}/explain` | Score, components, reasons, and rank of **one** movie for the given preferences (same body as `/recommendations`); `rank` is `null` and `filtered_by` lists the reason when a hard filter removes it |
-| POST | `/api/recommendations` | Ranked, explained recommendations |
+| POST | `/api/recommendations` | Ranked, explained recommendations (logged to the local usage table) |
+| POST | `/api/movies/search` | Title search + genre / language / year filters; `sort`: `relevance`, `rating`, `year`, `title`; optional `preferences` makes relevance = match score |
+| GET | `/api/feedback` | Saved likes, dislikes, and favourites with movie details |
+| PUT | `/api/feedback/{id}` | `{"reaction": "like" \| "dislike" \| null, "favorite": true \| false}`; omitted fields are unchanged |
+| DELETE | `/api/feedback/{id}`, `/api/feedback` | Clear one movie's feedback, or all of it |
+| GET | `/api/analytics` | Catalogue distributions, logged usage (selected genres, score distribution), feedback counts, cache stats |
 
 Request (all fields optional, but at least one preference is required; unknown fields are rejected):
 
@@ -173,11 +182,12 @@ Request (all fields optional, but at least one preference is required; unknown f
   "liked_movie_ids": [],
   "exclude_movie_ids": [],
   "top_n": 10,
-  "weights": {"genre": 0.30, "keyword": 0.25, "mood": 0.20, "language": 0.15, "year": 0.10}
+  "weights": {"genre": 0.30, "keyword": 0.25, "mood": 0.20, "language": 0.15, "year": 0.10},
+  "use_feedback": true
 }
 ```
 
-Each recommendation contains `rank`, `movie_id`, `title`, `movie`, `score`, `components` (each with `value`, `raw`, `weight`, `contribution`, and `active`), `matched` (genres, moods, language, keywords, year_in_range), `reasons`, `top_terms`, and `similar_to`. The response also carries `profile` (effective weights, active components, and inferred genres or moods), `filter_report`, `message`, and `warnings`.
+Each recommendation contains `rank`, `movie_id`, `title`, `movie`, `base_score` (preferences only), `feedback_adjustment`, `score` (final), `feedback` (closest liked / disliked movie and similarities), `summary` (one-sentence explanation), `components` (each with `value`, `raw`, `weight`, `contribution`, and `active`), `matched` (genres, moods, language, keywords, year_in_range), `reasons`, `top_terms`, and `similar_to`. The response also carries `profile` (effective weights, active components, and inferred genres or moods), `filter_report`, `message`, and `warnings`.
 
 The API returns **422** for empty preferences, out-of-range values, `year_min > year_max`, unknown genres, moods, languages, or movie ids, blank labels, unknown fields, negative weights, and all-zero weights.
 
@@ -267,3 +277,36 @@ npm run preview    # serves the build on http://localhost:4173 (still proxies /a
 * **States:** skeleton loaders while scoring, an offline banner with retry when the backend is unreachable, error panels with retry, and empty states for no preferences, no matches (with the filter funnel), and unknown movie or page.
 * **Responsive:** tested at 1440 px desktop, 820 px tablet, and 390 px phone widths with no horizontal scrolling. On narrow screens the navbar collapses to a menu.
 * **Design:** black and charcoal surfaces, a purple-to-blue gradient accent, glass panels, rounded cards, and hover lift animations. Animations are reduced when the OS asks for reduced motion. Posters are generated from genre colours, with no external image service.
+
+| `/browse` | Browse | Title search, genre and language dropdowns, release-year slider, sort by relevance / rating / newest / title, optional "rank by my preferences" with match-score badges, pagination |
+| `/my-list` | My List | Favourites, liked, and disliked movies, with buttons to change or clear them |
+| `/analytics` | Analytics | Stat tiles, genre distribution, most-selected genres, score distribution, rating and language distributions, most-recommended movies, engine cache stats; each chart has hover tooltips and a table view |
+
+## 10. Feedback, search, analytics, and performance
+
+**Explanations.** Every recommendation has a `summary` sentence built only from attributes that actually matched, ordered by how much each contributed. For example: *"Recommended because you selected serial killer as favourite theme, enjoy Crime and Thriller movies, prefer English-language content, and are in the mood for something Dark."* A genre or language you chose that the movie doesn't have never appears. If nothing matched, the summary says so.
+
+**Feedback.** Like, dislike, and favourite are stored in SQLite (`backend/data/cinematch.db`, git-ignored, one local profile). With `use_feedback` on (the default):
+
+```
+adjustment = 0.15 × (max item-similarity to a liked or favourite movie − max item-similarity to a disliked movie)
+score      = clip(base_score + adjustment, 0, 1)
+```
+
+* `base_score` (preferences) and `feedback_adjustment` are separate fields, and the UI shows them separately ("Preference 0.83 − feedback 0.02 = 0.82").
+* A movie never boosts itself; disliked movies are hidden (`filter_report.after_dislikes`).
+* Feedback only re-ranks movies that already match a preference (`base_score > 0`), so it cannot pull in unrelated titles.
+* Switching feedback off (`use_feedback: false`, or the toggle on the results page) restores the preference-only ranking exactly.
+
+**Analytics.** `/api/analytics` reports catalogue figures from the CSV, plus usage from the local log. The usage section covers explicit genre, mood, and language selections per `/recommendations` call, and the final scores of every movie served. With no requests logged, the usage section is empty (zeros) and says so. Nothing is estimated. Searches and explanations are not logged.
+
+**Performance.**
+
+| Optimisation | Effect (measured on this machine, 130 movies) |
+|---|---|
+| Fitted encoders, TF-IDF matrix, and item-similarity matrix cached on disk (`backend/data/.cache`), keyed by a SHA-256 of the dataset + pipeline settings; rebuilt only when the data changes | No TF-IDF re-fit on restart; startup 61 ms → 40 ms |
+| In-memory LRU cache (256 entries) of component scores per preference set; `min_rating` and `top_n` are applied fresh, so filters stay correct | Repeat recommendation 5.4 ms → 1.4 ms; per-movie explanation 5.4 ms → 0.5 ms |
+| LRU cache of keyword TF-IDF vectors | Repeated themes skip `vectorizer.transform` |
+| Precomputed row norms, serialised movies, and keyword tokens; vectorised year scoring; explanation terms read straight from the CSR arrays | Response building about 4× faster |
+
+Tests cover cache hits and misses, a cache hit that still applies a new `min_rating`, no re-fit when a valid disk cache exists, invalidation when data changes, and recovery from a corrupt cache file.

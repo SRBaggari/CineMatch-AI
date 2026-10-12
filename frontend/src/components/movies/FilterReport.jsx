@@ -6,6 +6,7 @@ const LABELS = {
   after_year_range: 'Year range',
   after_languages: 'Languages',
   after_exclusions: 'Exclusions',
+  after_dislikes: 'Not disliked',
   with_positive_score: 'Matching',
 };
 

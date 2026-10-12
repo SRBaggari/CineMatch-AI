@@ -146,3 +146,36 @@ For catalogues of 100k+ movies, the N² item matrix should be replaced with on-d
 * TF-IDF matches vocabulary, not meaning. *spaceship* and *starship* are unrelated tokens. Sentence embeddings would address this.
 * Content-based filtering tends to recommend "more of the same". A diversity re-ranking step such as MMR would help.
 * The default weights were chosen by judgement, not learned from user feedback.
+
+## Feedback-based personalisation
+
+Saved feedback adjusts the ranking without changing the preference score:
+
+```
+pos_m      = max over liked ∪ favourite movies j ≠ m of  item_similarity(m, j)
+neg_m      = max over disliked movies j ≠ m of           item_similarity(m, j)
+adjust_m   = 0.15 · (pos_m − neg_m)                          ∈ [−0.15, +0.15]
+score_m    = clip(base_m + adjust_m, 0, 1)
+```
+
+* `item_similarity` is the same cached cosine matrix used for "More like this", so feedback adds no new model.
+* A movie is excluded from its own `pos`/`neg` (a liked movie cannot vouch for itself).
+* Disliked movies are removed by a hard filter. Feedback re-ranks only movies with `base > 0`, so a like can never surface a movie that matches none of your preferences.
+* `base_score`, `feedback_adjustment`, and `score` are returned separately, together with the closest liked or disliked movie that caused the adjustment.
+
+The weight of 0.15 was chosen by judgement, like the component weights. It is large enough to reorder close neighbours (base scores of nearby results often differ by 0.01–0.05) but small enough that feedback alone cannot outweigh a strong preference match.
+
+## Explanation sentence
+
+`summary` is assembled from phrases. A phrase is included only when its component is active and the attribute actually matched:
+
+| Component | Phrase |
+|---|---|
+| genre | "enjoy Crime and Thriller movies" (or "loved movies in the … genre" when inferred from liked movies) |
+| keyword | "selected serial killer as favourite theme" (or "loved *Title*" when the match comes from a liked movie) |
+| mood | "are in the mood for something Dark" |
+| language | "prefer English-language content" |
+| year | "like movies released between 1990 and 2009" |
+| feedback | "liked *Title*" (when the feedback adjustment is at least +0.01) |
+
+The phrases are sorted by contribution (weight × component score, or the adjustment for feedback). They are then joined with an Oxford comma into "Recommended because you …". With no matched attribute, the sentence is "Recommended as the closest available match to your preferences."

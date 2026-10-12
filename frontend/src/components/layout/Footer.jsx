@@ -19,6 +19,9 @@ export default function Footer() {
         <nav className="footer-links" aria-label="Footer">
           <Link to="/preferences">Preferences</Link>
           <Link to="/recommendations">Recommendations</Link>
+          <Link to="/browse">Browse</Link>
+          <Link to="/my-list">My List</Link>
+          <Link to="/analytics">Analytics</Link>
           <Link to="/how-it-works">How It Works</Link>
         </nav>
       </div>
