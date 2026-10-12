@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { LoaderCircle, RefreshCw, TriangleAlert } from 'lucide-react';
+import { LoaderCircle, RefreshCw, SearchX, TriangleAlert } from 'lucide-react';
 import { api } from './api/client.js';
 import EmptyState from './components/EmptyState.jsx';
 import Header from './components/Header.jsx';
@@ -7,38 +7,57 @@ import HowItWorks from './components/HowItWorks.jsx';
 import MovieCard from './components/MovieCard.jsx';
 import MovieModal from './components/MovieModal.jsx';
 import PreferencePanel from './components/PreferencePanel.jsx';
-import TasteProfile from './components/TasteProfile.jsx';
+import TasteProfile, { FilterReport } from './components/TasteProfile.jsx';
 
-function defaultPrefs(meta) {
+function defaultPrefs(options) {
   return {
     genres: [],
+    languages: [],
     moods: [],
     keywords: [],
     likedMovies: [],
-    yearMin: meta?.year_min ?? 1900,
-    yearMax: meta?.year_max ?? 2100,
+    yearMin: options?.year_min ?? 1900,
+    yearMax: options?.year_max ?? 2100,
     minRating: 0,
-    languages: [],
-    topN: 12,
+    strictLanguages: false,
+    strictYears: false,
+    topN: options?.default_top_n ?? 10,
+    weights: { ...(options?.default_weights ?? { genre: 0.3, keyword: 0.25, mood: 0.2, language: 0.15, year: 0.1 }) },
   };
 }
 
-function toPayload(prefs) {
+function toPayload(prefs, options) {
+  // A slider left at the catalogue bounds means "no year preference".
+  const yearMin = prefs.yearMin > options.year_min ? prefs.yearMin : null;
+  const yearMax = prefs.yearMax < options.year_max ? prefs.yearMax : null;
   return {
     genres: prefs.genres,
+    languages: prefs.languages,
     moods: prefs.moods,
     keywords: prefs.keywords,
     liked_movie_ids: prefs.likedMovies.map((m) => m.movie_id),
-    year_min: prefs.yearMin,
-    year_max: prefs.yearMax,
+    year_min: yearMin,
+    year_max: yearMax,
     min_rating: prefs.minRating,
-    languages: prefs.languages,
+    strict_years: prefs.strictYears,
+    strict_languages: prefs.strictLanguages,
     top_n: prefs.topN,
+    weights: prefs.weights,
   };
 }
 
+function hasPreference(prefs, options) {
+  if (!options) return false;
+  const yearPref = prefs.yearMin > options.year_min || prefs.yearMax < options.year_max;
+  return (
+    prefs.genres.length + prefs.languages.length + prefs.moods.length + prefs.keywords.length + prefs.likedMovies.length >
+      0 || yearPref
+  );
+}
+
 export default function App() {
-  const [meta, setMeta] = useState(null);
+  const [options, setOptions] = useState(null);
+  const [dataset, setDataset] = useState(null);
   const [status, setStatus] = useState({ online: false, checking: true, movies: 0 });
   const [prefs, setPrefs] = useState(defaultPrefs(null));
   const [result, setResult] = useState(null);
@@ -47,13 +66,14 @@ export default function App() {
   const [stale, setStale] = useState(false);
   const [selected, setSelected] = useState(null);
 
-  const loadMeta = useCallback(() => {
+  const loadOptions = useCallback(() => {
     setStatus((s) => ({ ...s, checking: true }));
     setError('');
-    Promise.all([api.health(), api.meta()])
-      .then(([health, metadata]) => {
-        setMeta(metadata);
-        setPrefs(defaultPrefs(metadata));
+    Promise.all([api.health(), api.options(), api.dataset()])
+      .then(([health, opts, info]) => {
+        setOptions(opts);
+        setDataset(info);
+        setPrefs(defaultPrefs(opts));
         setStatus({ online: true, checking: false, movies: health.movies_loaded });
       })
       .catch((e) => {
@@ -62,20 +82,23 @@ export default function App() {
       });
   }, []);
 
-  useEffect(loadMeta, [loadMeta]);
+  useEffect(loadOptions, [loadOptions]);
 
-  const runRecommend = useCallback(async (currentPrefs) => {
-    setLoading(true);
-    setError('');
-    try {
-      setResult(await api.recommend(toPayload(currentPrefs)));
-      setStale(false);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+  const runRecommend = useCallback(
+    async (currentPrefs) => {
+      setLoading(true);
+      setError('');
+      try {
+        setResult(await api.recommend(toPayload(currentPrefs, options)));
+        setStale(false);
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [options],
+  );
 
   const updatePrefs = (updater) => {
     setPrefs(updater);
@@ -83,7 +106,7 @@ export default function App() {
   };
 
   const applyPreset = (preset) => {
-    const next = { ...defaultPrefs(meta), ...preset.prefs };
+    const next = { ...defaultPrefs(options), ...preset.prefs };
     setPrefs(next);
     runRecommend(next);
   };
@@ -97,8 +120,8 @@ export default function App() {
         : [...p.likedMovies, { movie_id: movie.movie_id, title: movie.title, year: movie.year }],
     }));
 
-  const hasSignal =
-    prefs.genres.length + prefs.moods.length + prefs.keywords.length + prefs.likedMovies.length > 0;
+  const hasSignal = hasPreference(prefs, options);
+  const recs = result?.recommendations ?? [];
 
   return (
     <div className="app">
@@ -109,12 +132,12 @@ export default function App() {
           Movies matched to <span className="gradient-text">your taste</span>, explained.
         </h2>
         <p>
-          A content-based recommender built with TF-IDF, cosine similarity and hybrid scoring. Every recommendation shows
-          exactly why it was chosen.
+          A content-based recommender built on feature vectors, TF-IDF and cosine similarity with weighted preference
+          matching. Every recommendation shows its score components and the reasons behind it.
         </p>
       </section>
 
-      {!meta && (
+      {!options && (
         <div className="panel center-panel">
           {status.checking ? (
             <p>
@@ -128,7 +151,7 @@ export default function App() {
               <p className="muted small">
                 Start it with <code>uvicorn app.main:app --reload --port 8000</code> inside the backend folder.
               </p>
-              <button type="button" className="btn btn-primary" onClick={loadMeta}>
+              <button type="button" className="btn btn-primary" onClick={loadOptions}>
                 <RefreshCw size={16} /> Retry
               </button>
             </>
@@ -136,16 +159,16 @@ export default function App() {
         </div>
       )}
 
-      {meta && (
+      {options && (
         <main className="layout">
           <aside>
             <PreferencePanel
-              meta={meta}
+              options={options}
               prefs={prefs}
               setPrefs={updatePrefs}
               onSubmit={() => runRecommend(prefs)}
               onReset={() => {
-                setPrefs(defaultPrefs(meta));
+                setPrefs(defaultPrefs(options));
                 setResult(null);
                 setStale(false);
                 setError('');
@@ -167,7 +190,7 @@ export default function App() {
             {loading && !result && (
               <div className="panel center-panel">
                 <LoaderCircle className="spin" size={28} />
-                <p>Building your taste profile and scoring every movie…</p>
+                <p>Scoring every movie against your preferences…</p>
               </div>
             )}
 
@@ -176,37 +199,56 @@ export default function App() {
                 {stale && (
                   <div className="stale-banner">
                     Your preferences changed.
-                    <button type="button" className="btn btn-small btn-primary" onClick={() => runRecommend(prefs)} disabled={loading || !hasSignal}>
+                    <button
+                      type="button"
+                      className="btn btn-small btn-primary"
+                      onClick={() => runRecommend(prefs)}
+                      disabled={loading || !hasSignal}
+                    >
                       {loading ? <LoaderCircle size={14} className="spin" /> : <RefreshCw size={14} />} Update results
                     </button>
                   </div>
                 )}
+
                 <TasteProfile result={result} />
-                <div className="results-heading">
-                  <h2>Top {result.recommendations.length} recommendations</h2>
-                  <span className="muted small">Ranked by hybrid score</span>
-                </div>
-                <div className={`card-list ${loading ? 'is-loading' : ''}`}>
-                  {result.recommendations.map((rec) => (
-                    <MovieCard
-                      key={rec.movie.movie_id}
-                      rec={rec}
-                      isLiked={likedIds.has(rec.movie.movie_id)}
-                      onToggleLike={toggleLike}
-                      onOpen={setSelected}
-                    />
-                  ))}
-                </div>
+
+                {recs.length === 0 ? (
+                  <div className="panel center-panel no-results">
+                    <SearchX size={36} />
+                    <h2>No matching movies</h2>
+                    <p className="muted">{result.message}</p>
+                    <FilterReport report={result.filter_report} />
+                  </div>
+                ) : (
+                  <>
+                    <div className="results-heading">
+                      <h2>Top {recs.length} recommendations</h2>
+                      <span className="muted small">Ranked by relevance score (0–1), not a probability</span>
+                    </div>
+                    <div className={`card-list ${loading ? 'is-loading' : ''}`}>
+                      {recs.map((rec) => (
+                        <MovieCard
+                          key={rec.movie_id}
+                          rec={rec}
+                          isLiked={likedIds.has(rec.movie_id)}
+                          onToggleLike={toggleLike}
+                          onOpen={setSelected}
+                        />
+                      ))}
+                    </div>
+                  </>
+                )}
               </>
             )}
           </div>
         </main>
       )}
 
-      <HowItWorks meta={meta} />
+      <HowItWorks dataset={dataset} />
 
       <footer className="footer">
-        CineMatch AI · DecodeLabs AI Industrial Training · Project 3: AI Recommendation Logic
+        <p>CineMatch AI · DecodeLabs AI Industrial Training · Project 3: AI Recommendation Logic</p>
+        {dataset && <p className="provenance">Dataset note: {dataset.provenance}</p>}
       </footer>
 
       {selected && (

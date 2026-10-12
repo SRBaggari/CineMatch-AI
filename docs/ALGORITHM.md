@@ -1,142 +1,148 @@
 # CineMatch AI: Recommendation Algorithm
 
-This document explains, step by step, how CineMatch AI turns a user's preferences into ranked, explained recommendations. All the code is in `backend/app/recommender.py`.
+This document explains how CineMatch AI turns a user's preferences into ranked, explained recommendations. The code is in `backend/app/recommender.py`. Default parameters are in `backend/app/config.py`.
 
 ## Why content-based filtering?
 
 | Approach | Needs | Fits this project? |
 |---|---|---|
-| Collaborative filtering | Many users' ratings ("people like you also liked…") | No. The app has no user accounts and no rating history |
-| **Content-based filtering** | Descriptions of the items | **Yes.** It works from the first request (no cold-start problem), runs locally, and is explainable |
-| Hybrid | Both | Part of it: content similarity is blended with rule-based pattern scores |
+| Collaborative filtering | Many users' ratings ("people like you also liked…") | No. There are no user accounts or rating history |
+| **Content-based filtering** | Descriptions of the items | **Yes.** It works on the first request (no cold start), runs locally, and every score is explainable |
 
-## Step 1: Feature engineering (the "content soup")
+## Step 1: Movie feature vectors
 
-Each movie's metadata becomes a single string. Fields are repeated to set their importance:
+Each of the N movies is represented by five features:
 
-| Field | Repeat | Reason |
+| Feature | Encoding | Built with |
 |---|---|---|
-| genres | ×3 | Strongest signal of taste |
-| moods | ×2 | Captures how a film feels |
-| keywords | ×2 | Specific themes ("time loop", "serial killer") |
-| director | ×1 | Style signal |
-| cast | ×1 | Star preference |
-| overview | ×1 | Free-text context |
+| Genres | multi-hot vector over the 19 genres | `MultiLabelBinarizer` |
+| Moods | multi-hot vector over the 15 moods | `MultiLabelBinarizer` |
+| Language | one-hot vector over the 10 languages | `MultiLabelBinarizer` |
+| Keywords + description | TF-IDF vector (~1,250 terms) | `TfidfVectorizer` |
+| Release year | integer | — |
 
-Multi-word labels are normalised into single tokens (`normalize_token` in `data_loader.py`):
+### TF-IDF text document
 
-```
-"Science Fiction"   → sciencefiction
-"Christopher Nolan" → christophernolan
-"Mind-Bending"      → mindbending
-```
-
-Without this step, "Christopher Nolan" and "Christopher Lloyd" would share the token *christopher* and look falsely similar.
-
-Real soup for **Toy Story**:
+Each movie's text document has every keyword twice as a single squashed tag, then once as raw words, then the description:
 
 ```
-animation comedy family adventure ×3 · funny heartwarming feelgood ×2 ·
-toys friendship jealousy rivalry adventure ×2 · johnlasseter · tomhanks timallen donrickles ·
-A cowboy doll feels threatened when a flashy new space ranger toy becomes his owner's favourite.
+"time travel" → timetravel timetravel time travel
+document      = keyword tags ×2 + keyword words + description
 ```
 
-## Step 2: TF-IDF vectorisation
-
-`TfidfVectorizer(stop_words="english", sublinear_tf=True)` converts the 130 soups into a 130 × ~1,600 sparse matrix.
+Squashing (`normalize_token`) keeps a multi-word theme as one feature, so *time travel* does not match every description that merely mentions *time*. The raw words still let a free-text keyword match description text.
 
 ```
-tfidf(t, d) = (1 + log tf(t, d)) × (ln((1 + N) / (1 + df(t))) + 1)
+tfidf(t, d) = (1 + ln tf(t, d)) · (ln((1 + N) / (1 + df(t))) + 1)      (sublinear_tf, smooth_idf)
 ```
 
-* **TF** (term frequency, log-scaled because `sublinear_tf=True`) rewards terms that appear often in one movie, such as the repeated genres.
-* **IDF** (inverse document frequency) rewards rare terms. `timeloop` appears in 2 movies and `drama` in 75, so a shared *time loop* says much more than a shared *drama*.
-* Each row is L2-normalised, so cosine similarity becomes a dot product.
+IDF rewards rare terms. `timeloop` appears in 2 documents, while `friendship` appears in 16, so a shared *time loop* is much stronger evidence of similar taste than a shared *friendship*. Each row is L2-normalised.
 
-The engine also precomputes the 130 × 130 **item-similarity matrix**, which is used for "More like this" and for "similar to a movie you liked".
+## Step 2: User profile
 
-## Step 3: Building the user profile vector
+The user's preferences are mapped into the same spaces:
 
-The engine combines two sources of preference:
+* **Genres, moods, languages:** multi-hot vectors of the chosen labels. Input is matched case-insensitively, and unknown labels are rejected with a 422.
+* **Keywords:** turned into a document with the same rules and transformed by the *same fitted* vectoriser.
+* **Liked movies (optional):** their mean TF-IDF vector is averaged with the keyword vector. If no genres or moods were chosen, the union of the liked movies' genres and moods is used ("pattern inference").
+* **Year range:** `year_min` and/or `year_max`.
 
-1. **Explicit preferences.** Genres, moods, and keywords are turned into a pseudo-document using the same repetition weights. Each keyword is added both as a squashed tag (`timetravel`) and as raw words (`time travel`), so it can match tags and overview text. The pseudo-document is then transformed by the *same fitted* vectoriser.
-2. **Behavioural preferences.** The mean TF-IDF vector of the movies the user marked as liked.
+## Step 3: Component scores (all in [0, 1])
 
-```
-profile = normalize( mean( normalize(explicit), normalize(liked_mean) ) )
-```
+| Component | Formula | Notes |
+|---|---|---|
+| Genre | `cos(u, m) = (u·m)/(‖u‖‖m‖) = \|U∩M\| / √(\|U\|·\|M\|)` | Cosine of binary vectors. It rewards covering the user's genres and penalises extra, unrequested genres |
+| Mood | same as genre | |
+| Language | `1 if movie.language ∈ preferred else 0` | An indicator, so choosing several languages does not dilute the score |
+| Keyword | `cos(tfidf_user, tfidf_movie) / max_m cos(…)` | Max-normalisation over the whole catalogue |
+| Year | `max(0, 1 − d / 20)`, where `d` = years outside the range | 1 inside the range, 0.5 ten years away, 0 at twenty years |
 
-The highest-weighted dimensions of this vector are shown in the UI as **"Your AI Taste Profile"**.
+**Why normalise the keyword score?** Genre and mood cosines reach 1.0 for a perfect match, but a short keyword query compared with a full description rarely gets above 0.4 even for the best movie. Without rescaling, the keyword weight would be ineffective in practice. Dividing by the best cosine in the catalogue maps the strongest text match to 1 and keeps proportions. The divisor is taken over all movies, not the filtered subset, so a movie's score never depends on which filters are applied. The un-normalised value is returned as `components.keyword.raw`.
 
-**Pattern inference:** if the user liked movies but picked no genres or moods, the union of the liked movies' genres and moods becomes the target set for Step 5.
-
-## Step 4: Cosine similarity
-
-```
-content(u, m) = (profile · movie_m) / (‖profile‖ · ‖movie_m‖)   ∈ [0, 1]
-```
-
-This is computed for all movies in one vectorised scikit-learn call.
-
-## Step 5: Hybrid scoring, filtering, ranking
+## Step 4: Weighted score
 
 ```
-score = w_c·content + w_g·Jaccard(G_user, G_movie) + w_m·Jaccard(M_user, M_movie) + w_q·rating_norm
-
-Jaccard(A, B) = |A ∩ B| / |A ∪ B|
-rating_norm  = (rating − min_rating) / (max_rating − min_rating)
+active_c  = the user expressed a preference for component c
+w'_c      = w_c / Σ_{k active} w_k        (0 for inactive components)
+score     = Σ_c w'_c · s_c                ∈ [0, 1]
 ```
 
-The default weights are content 0.55, genre 0.20, mood 0.15, and quality 0.10, set in `config.py`. A component with no signal (no target genres, for example) is switched off and the remaining weights are re-normalised to sum to 1.
+Default weights are genre 0.30, keyword 0.25, mood 0.20, language 0.15, and year 0.10. They can be overridden per request (`weights`). Any non-negative values are accepted, because they are re-normalised. A request whose active weights are all zero is rejected.
 
-Hard filters (year range, minimum rating, languages) are applied next. Already-liked movies are removed, and the rest are sorted by score.
+Re-normalising over active components means that a user who gives only genres is scored purely on genre. The score is not capped at 0.30 just because the other preferences were left blank.
+
+**Hard filters vs. soft preferences:** if `strict_languages` or `strict_years` is set, that preference becomes a filter. Every remaining movie would score 1.0 on that component, which adds nothing to the ranking but inflates scores, so the component is switched off. The exception is when it is the only preference; the ranking then falls back to the tie-breakers.
+
+## Step 5: Filtering and ranking
+
+1. `min_rating` (always a hard filter), plus the strict year and language filters when set.
+2. Remove liked and `exclude_movie_ids` movies.
+3. Remove movies with score 0, which match none of the preferences.
+4. Sort by **score ↓, rating ↓, movie_id ↑** (`numpy.lexsort`). Scores are rounded to 6 decimals first, so floating-point noise cannot reorder movies with genuinely equal scores.
+5. Return the first `top_n` (default 10).
+
+**Duplicates** are prevented at three levels. The loader drops repeated ids and repeated title+year pairs. Request lists are de-duplicated case-insensitively. Each movie index appears once in the candidate set, with a defensive `seen` check on output.
+
+If nothing survives, the response has an empty list, a `message` naming the step that removed every movie, and a `filter_report` such as `{"total": 130, "after_min_rating": 0, …}`.
 
 ## Step 6: Explanation
 
-For every recommended movie, the engine returns:
+For each recommendation the engine returns:
 
-* **Matched genres, moods, and keywords**: set intersections with the user's targets.
-* **similar_to**: the liked movie with the highest item similarity, plus any shared director, cast, or keywords.
-* **shared_features**: the five dimensions with the largest `profile_i × movie_i`. These are the terms that contribute most to the cosine score.
-* **score_breakdown**: score, weight, and contribution for each component. The contributions add up exactly to the final score.
-* **reasons**: readable sentences built from the items above.
+* `components`: value, raw value, effective weight, contribution, and an active flag for each of the five components. The contributions add up to `score`.
+* `matched`: the movie's genres, moods, language, and keywords that match the user's, plus whether its year is inside the range.
+* `reasons`: one sentence per contributing component, ordered by contribution (largest first).
+* `top_terms`: the TF-IDF terms with the largest `profile_t × movie_t`, which are the terms driving the keyword cosine.
+* `similar_to`: when liked movies were given, the liked movie closest to this one.
 
-## Worked example: a user who liked *Toy Story*
+### What the score means
 
-Request: `{"liked_movie_ids": [30]}`. No genres or moods were selected, so they are inferred:
+The score is a weighted similarity used to **rank** movies. It is not a probability, and it is not calibrated against real user feedback. A score of 0.72 means "72% of the maximum weighted match under these weights", not "72% chance you will enjoy it". The UI shows it as a 0–1 relevance score.
 
-* Genres → {Animation, Adventure, Comedy, Family}
-* Moods → {Feel-Good, Funny, Heartwarming}
+## Worked example
 
-Top recommendation: **Finding Nemo**
+Input (the request in `app/demo.py`):
 
-| Component | Score | Weight | Contribution |
-|---|---|---|---|
-| Content (cosine) | 0.267 | 0.55 | 0.147 |
-| Genre (Jaccard) | 1.000 | 0.20 | 0.200 |
-| Mood (Jaccard) | 1.000 | 0.15 | 0.150 |
-| Quality (8.2/10) | 0.607 | 0.10 | 0.061 |
-| **Final** | | | **0.558 → 56% match** |
+```json
+{"genres": ["Science Fiction", "Thriller"], "languages": ["English"], "moods": ["Mind-Bending"],
+ "keywords": ["time travel", "dreams", "artificial intelligence"],
+ "year_min": 1995, "year_max": 2020, "min_rating": 7.5}
+```
 
-Explanation shown to the user:
+All five components are active, so the default weights are used unchanged.
 
-* Matches your genres: Animation, Adventure, Comedy, Family
-* Fits the mood you want: Feel-Good, Funny, Heartwarming
-* 27% similar to Toy Story, which you liked
-* Strongest shared signals: Animation · Adventure · Comedy · friendship · Family
+| # | Movie | genre | language | mood | keyword (raw cos) | year | **score** |
+|---|---|---|---|---|---|---|---|
+| 1 | Ex Machina | 0.817 | 1 | 0.577 | 0.460 (0.192) | 1.0 | **0.725** |
+| 2 | Inception | 0.817 | 1 | 0.577 | 0.425 (0.178) | 1.0 | **0.717** |
+| 3 | The Matrix | 0.500 | 1 | 0.577 | 0.479 (0.200) | 1.0 | **0.635** |
+| 4 | Terminator 2 | 0.500 | 1 | 0.000 | 1.000 (0.418) | 0.8 | **0.630** |
+| 5 | The Prestige | 0.707 | 1 | 0.577 | 0.000 (0.000) | 1.0 | **0.578** |
+
+Checking Ex Machina by hand:
+
+* **Genre:** Ex Machina has genres {Science Fiction, Drama, Thriller} and the user chose {Science Fiction, Thriller}, so the cosine is 2 / √(2·3) = **0.817**.
+* **Mood:** Ex Machina has moods {Thought-Provoking, Suspenseful, Mind-Bending} and the user chose {Mind-Bending}, so the cosine is 1 / √(1·3) = **0.577**.
+* **Score:** 0.30·0.817 + 0.15·1 + 0.20·0.577 + 0.25·0.460 + 0.10·1 = **0.725**.
+
+Terminator 2 has the best text match (both *time travel* and *artificial intelligence*), so its keyword score is exactly 1.0. Its year score is 0.8 because 1991 is 4 years before 1995: 1 − 4/20 = 0.8.
+
+## Item-to-item similarity ("More like this")
+
+The blocks are combined into one vector per movie: `[ √0.35·ĝ , √0.30·t̂ , √0.25·m̂ , √0.10·l̂ ]`, where each block is L2-normalised. The cosine between two such vectors equals the weighted average of the per-block cosines. All pairs are precomputed once at startup (an N×N matrix).
 
 ## Complexity
 
 | Operation | Cost |
 |---|---|
-| Startup (TF-IDF + item matrix) | O(N·V) + O(N²). A few seconds at startup for N = 130, mostly library imports |
-| One recommendation | O(N·V) sparse dot products, a few milliseconds |
-| Memory | Item matrix N² floats (130² ≈ 17k) |
+| Startup | O(N·V) TF-IDF + O(N²) item matrix, under a second for N = 130 (plus library import time) |
+| One recommendation | O(N·(G + M + L + nnz)) vector operations, a few milliseconds |
 
-With much larger catalogues (100k+ movies), the N² matrix should be replaced with on-demand similarity or an approximate nearest-neighbour index.
+For catalogues of 100k+ movies, the N² item matrix should be replaced with on-demand similarity or an approximate nearest-neighbour index.
 
 ## Known limitations
 
-* The dataset is small and hand-curated (130 movies), so results are bounded by the catalogue.
-* Content-based filtering can over-specialise and recommend "more of the same". A diversity re-ranking step such as MMR would help.
-* TF-IDF matches vocabulary, not meaning. *spaceship* and *starship* are unrelated tokens. Sentence embeddings would fix this, at the cost of a heavier model.
+* The catalogue is small and its metadata is approximate (see the README provenance note).
+* TF-IDF matches vocabulary, not meaning. *spaceship* and *starship* are unrelated tokens. Sentence embeddings would address this.
+* Content-based filtering tends to recommend "more of the same". A diversity re-ranking step such as MMR would help.
+* The default weights were chosen by judgement, not learned from user feedback.

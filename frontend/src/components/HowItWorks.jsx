@@ -4,43 +4,44 @@ const STEPS = [
   {
     icon: UserRound,
     title: '1. Collect preferences',
-    text: 'Genres, moods, themes and favourite movies are gathered from the form.',
+    text: 'Genres, languages, moods, keywords, liked movies, release years and a minimum rating.',
   },
   {
     icon: Layers,
-    title: '2. Feature engineering',
-    text: 'Each movie becomes a weighted text "soup" of genres ×3, moods ×2, keywords ×2, director, cast and overview.',
+    title: '2. Feature vectors',
+    text: 'Each movie becomes multi-hot genre and mood vectors, a one-hot language vector and its release year.',
   },
   {
     icon: Cpu,
-    title: '3. TF-IDF vectors',
-    text: 'Scikit-learn converts every soup into a vector. Rare, specific terms weigh more than common ones.',
+    title: '3. TF-IDF',
+    text: 'Keywords and descriptions are converted to TF-IDF vectors, so rare, specific themes weigh more.',
   },
   {
     icon: Network,
     title: '4. Cosine similarity',
-    text: 'Your profile vector (preferences + liked movies) is compared with every movie vector.',
+    text: 'Your preferences are mapped into the same spaces and compared with every movie, giving scores in [0, 1].',
   },
   {
     icon: Target,
-    title: '5. Hybrid ranking',
-    text: 'Content similarity is blended with genre and mood Jaccard overlap plus a quality score, then filtered.',
+    title: '5. Weighted ranking',
+    text: 'Configurable weights are normalised over the preferences you set. Hard filters apply, ties break by rating then id.',
   },
   {
     icon: ListChecks,
     title: '6. Explanation',
-    text: 'Each result shows matched patterns, the liked movie it resembles and the full score maths.',
+    text: 'Each result lists matched preferences, reasons ordered by contribution, and every score component.',
   },
 ];
 
-export default function HowItWorks({ meta }) {
+export default function HowItWorks({ dataset }) {
   return (
     <section className="how-it-works" id="how-it-works">
       <h2>How the recommendation engine works</h2>
       <p className="muted">
-        A transparent, content-based pipeline. No external AI services, no random picks: every score can be traced back
-        to the data.
-        {meta && ` The current model has ${meta.total_movies} movies and ${meta.vocabulary_size} TF-IDF features.`}
+        A transparent, content-based pipeline. No external AI services and no random picks: every score can be traced
+        back to the data.
+        {dataset &&
+          ` The catalogue has ${dataset.total_movies} movies, ${dataset.genres} genres, ${dataset.moods} moods, ${dataset.languages} languages and ${dataset.vocabulary_size} TF-IDF terms.`}
       </p>
       <div className="steps">
         {STEPS.map(({ icon: Icon, title, text }) => (
@@ -52,9 +53,13 @@ export default function HowItWorks({ meta }) {
         ))}
       </div>
       <div className="formula">
-        score = w<sub>c</sub>·cos(profile, movie) + w<sub>g</sub>·Jaccard(genres) + w<sub>m</sub>·Jaccard(moods) +
-        w<sub>q</sub>·rating<sub>norm</sub>
+        score = w<sub>genre</sub>·cos(genres) + w<sub>keyword</sub>·cos<sub>TF-IDF</sub>/max + w<sub>mood</sub>·cos(moods) +
+        w<sub>language</sub>·match + w<sub>year</sub>·year_fit, &nbsp; Σw = 1
       </div>
+      <p className="muted small">
+        The score is a weighted similarity between 0 and 1. It ranks movies; it is not a probability that you will like
+        them.
+      </p>
     </section>
   );
 }

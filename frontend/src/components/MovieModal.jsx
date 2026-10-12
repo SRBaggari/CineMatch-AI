@@ -5,10 +5,11 @@ import Poster from './Poster.jsx';
 
 function sharedSummary(item) {
   const parts = [];
-  if (item.shared_director) parts.push('same director');
   if (item.shared_genres.length) parts.push(item.shared_genres.join(', '));
-  if (item.shared_cast.length) parts.push(`cast: ${item.shared_cast.join(', ')}`);
+  if (item.shared_moods.length) parts.push(item.shared_moods.join(', '));
   if (item.shared_keywords.length) parts.push(`themes: ${item.shared_keywords.join(', ')}`);
+  if (item.same_director) parts.push('same director');
+  if (item.shared_cast.length) parts.push(`cast: ${item.shared_cast.join(', ')}`);
   return parts.join(' · ');
 }
 
@@ -51,7 +52,7 @@ export default function MovieModal({ movie, onClose, onSelect, isLiked, onToggle
             <div className="meta-row">
               <span>{movie.year}</span>
               <span>
-                <Star size={13} fill="currentColor" className="star" /> {movie.rating.toFixed(1)}/10
+                <Star size={13} fill="currentColor" className="star" /> {movie.rating.toFixed(1)}/10 (approx.)
               </span>
               <span>
                 <Clock size={13} /> {movie.runtime} min
@@ -99,7 +100,7 @@ export default function MovieModal({ movie, onClose, onSelect, isLiked, onToggle
           </div>
         </div>
 
-        <h3 className="modal-subtitle">More like this (item-to-item cosine similarity)</h3>
+        <h3 className="modal-subtitle">More like this (cosine similarity of movie feature vectors)</h3>
         {loading && (
           <p className="muted">
             <LoaderCircle size={14} className="spin" /> Computing similar movies…
@@ -112,7 +113,7 @@ export default function MovieModal({ movie, onClose, onSelect, isLiked, onToggle
               <Poster movie={item.movie} size="sm" />
               <div>
                 <strong>{item.movie.title}</strong>
-                <span className="similar-score">{item.match_percent}% similar</span>
+                <span className="similar-score">similarity {item.similarity.toFixed(2)}</span>
                 <span className="muted small">{sharedSummary(item)}</span>
               </div>
             </button>

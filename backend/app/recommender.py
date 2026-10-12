@@ -1,124 +1,200 @@
-"""Content-based recommendation engine.
+"""Content-based recommendation engine with explainable weighted preference matching.
 
 Pipeline
 --------
-1. Feature engineering: every movie becomes a weighted "content soup" built from
-   its genres, moods, keywords, director, cast and overview text.
-2. Vectorisation: TF-IDF turns each soup into a sparse vector. Rare, specific
-   terms (e.g. "time loop") get more weight than common ones (e.g. "drama").
-3. User profile: the user's explicit preferences (genres, moods, keywords) and the
-   averaged vectors of the movies they like are blended into one profile vector.
-4. Similarity: cosine similarity between the profile vector and every movie.
-5. Hybrid scoring: the content similarity is blended with genre overlap, mood
-   overlap (both Jaccard) and a normalised quality score.
-6. Explanation: every recommendation carries the matched genres, moods, keywords,
-   the liked movie it most resembles, the strongest shared features and a full
-   score breakdown.
+1. Feature vectors: every movie is represented by
+   - a multi-hot genre vector,
+   - a multi-hot mood vector,
+   - a one-hot language vector,
+   - a TF-IDF vector of its keywords and description,
+   - its release year.
+2. User profile: the user's preferences are mapped into the same spaces.
+   Keywords (and, optionally, liked movies) form a TF-IDF profile vector.
+3. Component scores, each in [0, 1]:
+   - genre    cosine(user genres, movie genres)   = |U ∩ M| / sqrt(|U|·|M|)
+   - mood     cosine(user moods, movie moods)
+   - language 1 if the movie's language was preferred, else 0
+   - keyword  cosine(TF-IDF profile, TF-IDF movie), divided by the best value in
+              the catalogue so the strongest text match scores 1
+   - year     1 inside the preferred range, linear decay outside it
+4. Weighted score: weights of the components the user gave a preference for are
+   re-normalised to sum to 1, and score = Σ weight_c · component_c.
+5. Hard filters (minimum rating; optionally strict year range / languages),
+   exclusion of liked movies, removal of zero-score movies, deterministic ranking.
+6. Explanation: matched preferences, reasons ordered by contribution, and the
+   full component breakdown for every recommendation.
+
+The score is a relevance score in [0, 1]. It is a weighted similarity, not a
+calibrated probability that the user will like the movie.
 """
 
+import math
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
+from scipy.sparse import csr_matrix, hstack
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-from sklearn.preprocessing import normalize
+from sklearn.preprocessing import MultiLabelBinarizer, normalize
 
-from .config import FIELD_WEIGHTS, SCORE_WEIGHTS
+from .config import (
+    DATASET_INFO,
+    DEFAULT_TOP_N,
+    ITEM_SIMILARITY_WEIGHTS,
+    KEYWORD_REPEAT,
+    MAX_TOP_N,
+    SCORE_WEIGHTS,
+    YEAR_DECAY_YEARS,
+)
 from .data_loader import normalize_token
+
+COMPONENTS = ("genre", "language", "mood", "keyword", "year")
+SCORE_DECIMALS = 6  # scores are rounded before ranking so float noise cannot break ties
 
 
 class EmptyPreferencesError(ValueError):
-    """Raised when a request contains no usable preference signal."""
+    """Raised when a request contains no preference to match against."""
+
+
+class InvalidPreferenceError(ValueError):
+    """Raised when a request references values that do not exist in the catalogue."""
 
 
 @dataclass
 class UserPreferences:
     genres: list[str] = field(default_factory=list)
+    languages: list[str] = field(default_factory=list)
     moods: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
     liked_movie_ids: list[int] = field(default_factory=list)
     year_min: int | None = None
     year_max: int | None = None
     min_rating: float = 0.0
-    languages: list[str] = field(default_factory=list)
-    top_n: int = 12
+    strict_years: bool = False
+    strict_languages: bool = False
+    exclude_movie_ids: list[int] = field(default_factory=list)
+    top_n: int = DEFAULT_TOP_N
+    weights: dict[str, float] | None = None
 
 
-def jaccard(a: set, b: set) -> float:
-    """|A ∩ B| / |A ∪ B| — 1.0 means identical sets, 0.0 means nothing in common."""
+# ---------------------------------------------------------------------- #
+# Pure scoring helpers (unit-tested directly)
+# ---------------------------------------------------------------------- #
+def set_cosine(a: set, b: set) -> float:
+    """Cosine similarity of two binary (multi-hot) vectors: |A ∩ B| / sqrt(|A|·|B|)."""
     if not a or not b:
         return 0.0
-    return len(a & b) / len(a | b)
+    return len(a & b) / math.sqrt(len(a) * len(b))
+
+
+def year_score(year: int, year_min: int | None, year_max: int | None, decay: int = YEAR_DECAY_YEARS) -> float:
+    """1.0 inside [year_min, year_max]; loses 1/decay per year outside; never below 0."""
+    if year_min is not None and year < year_min:
+        distance = year_min - year
+    elif year_max is not None and year > year_max:
+        distance = year - year_max
+    else:
+        distance = 0
+    return max(0.0, 1.0 - distance / decay)
+
+
+def normalize_weights(weights: dict[str, float], active: dict[str, bool]) -> dict[str, float]:
+    """Zero the weights of inactive components and scale the rest to sum to 1."""
+    raw = {c: (float(weights.get(c, 0.0)) if active.get(c) else 0.0) for c in COMPONENTS}
+    total = sum(raw.values())
+    if total <= 0:
+        raise InvalidPreferenceError(
+            "The weights of the preferences you provided are all zero, so no score can be computed."
+        )
+    return {c: raw[c] / total for c in COMPONENTS}
+
+
+def unique(values) -> list:
+    """De-duplicate while preserving order (case/spacing-insensitive for strings)."""
+    seen, result = set(), []
+    for v in values:
+        key = normalize_token(v) if isinstance(v, str) else v
+        if key not in seen and key != "":
+            seen.add(key)
+            result.append(v.strip() if isinstance(v, str) else v)
+    return result
+
+
+def keyword_document(keywords: list[str], text: str = "") -> str:
+    """Text used for TF-IDF: each keyword as a squashed tag (repeated) and as raw words."""
+    parts = []
+    for kw in keywords:
+        parts.extend([normalize_token(kw)] * KEYWORD_REPEAT)
+        parts.append(kw.lower())
+    parts.append(text)
+    return " ".join(p for p in parts if p)
 
 
 class RecommendationEngine:
     def __init__(self, movies: pd.DataFrame, score_weights: dict | None = None):
         self.movies = movies.reset_index(drop=True)
         self.score_weights = {**SCORE_WEIGHTS, **(score_weights or {})}
-        self.id_to_index = {int(mid): i for i, mid in enumerate(self.movies["movie_id"])}
-        # Maps a squashed token back to a readable label ("sciencefiction" -> "Science Fiction").
+        self.ids = self.movies["movie_id"].to_numpy(dtype=int)
+        self.years = self.movies["year"].to_numpy(dtype=int)
+        self.ratings = self.movies["rating"].to_numpy(dtype=float)
+        self.id_to_index = {int(mid): i for i, mid in enumerate(self.ids)}
         self.token_labels: dict[str, str] = {}
         self._build_features()
 
     # ------------------------------------------------------------------ #
-    # Feature engineering
+    # Step 1: feature vectors
     # ------------------------------------------------------------------ #
-    def _tag(self, value: str) -> str:
-        token = normalize_token(value)
-        if token:
-            self.token_labels.setdefault(token, value)
-        return token
-
-    def _content_soup(self, row: pd.Series) -> str:
-        parts: list[str] = []
-        for column, repeat in FIELD_WEIGHTS.items():
-            values = row[column] if isinstance(row[column], list) else [row[column]]
-            tokens = [self._tag(v) for v in values if v]
-            parts.extend(tokens * repeat)
-        parts.append(row["overview"])
-        return " ".join(parts)
-
     def _build_features(self) -> None:
-        # Register genre and mood labels first so their capitalised form wins when
-        # a keyword normalises to the same token (keyword "family" vs genre "Family").
-        for column in ("genres", "moods"):
-            for labels in self.movies[column]:
-                for value in labels:
-                    self._tag(value)
-        self.movies["soup"] = self.movies.apply(self._content_soup, axis=1)
+        # Structured attributes -> multi-hot / one-hot vectors.
+        self.genre_encoder = MultiLabelBinarizer()
+        self.genre_matrix = self.genre_encoder.fit_transform(self.movies["genres"]).astype(float)
+        self.mood_encoder = MultiLabelBinarizer()
+        self.mood_matrix = self.mood_encoder.fit_transform(self.movies["moods"]).astype(float)
+        self.language_encoder = MultiLabelBinarizer()
+        self.language_matrix = self.language_encoder.fit_transform(
+            [[lang] for lang in self.movies["language"]]
+        ).astype(float)
 
+        # Case-insensitive lookup from user input to canonical labels.
+        self.label_lookup = {
+            "genre": {normalize_token(g): g for g in self.genre_encoder.classes_},
+            "mood": {normalize_token(m): m for m in self.mood_encoder.classes_},
+            "language": {normalize_token(lang): lang for lang in self.language_encoder.classes_},
+        }
+
+        # Keywords + description -> TF-IDF vectors.
+        for keywords in self.movies["keywords"]:
+            for kw in keywords:
+                self.token_labels.setdefault(normalize_token(kw), kw)
+        documents = [
+            keyword_document(row.keywords, row.overview) for row in self.movies.itertuples(index=False)
+        ]
         self.vectorizer = TfidfVectorizer(stop_words="english", sublinear_tf=True)
-        self.tfidf_matrix = self.vectorizer.fit_transform(self.movies["soup"])
+        self.text_matrix = self.vectorizer.fit_transform(documents)
         self.feature_names = self.vectorizer.get_feature_names_out()
 
-        # Pre-computed movie-to-movie similarity matrix (n_movies x n_movies).
-        self.item_similarity = cosine_similarity(self.tfidf_matrix)
+        self.genre_sets = [set(gs) for gs in self.movies["genres"]]
+        self.mood_sets = [set(ms) for ms in self.movies["moods"]]
+        self.keyword_tokens = [{normalize_token(k) for k in ks} for ks in self.movies["keywords"]]
+        self.cast_sets = [set(cs) for cs in self.movies["cast"]]
 
-        self.genre_sets = [{normalize_token(g) for g in gs} for gs in self.movies["genres"]]
-        self.mood_sets = [{normalize_token(m) for m in ms} for ms in self.movies["moods"]]
-        self.keyword_sets = [{normalize_token(k) for k in ks} for ks in self.movies["keywords"]]
-        self.cast_sets = [{normalize_token(c) for c in cs} for cs in self.movies["cast"]]
-
-        ratings = self.movies["rating"].to_numpy(dtype=float)
-        spread = ratings.max() - ratings.min()
-        self.quality_scores = (ratings - ratings.min()) / spread if spread else np.ones_like(ratings)
-
-        self.all_genres = self._label_counts("genres")
-        self.all_moods = self._label_counts("moods")
-        self.all_keywords = self._label_counts("keywords")
-        self.all_languages = self._label_counts_scalar("language")
-
-    def _label_counts(self, column: str) -> dict[str, int]:
-        counts = self.movies[column].explode().dropna().value_counts()
-        return {str(k): int(v) for k, v in counts.items()}
-
-    def _label_counts_scalar(self, column: str) -> dict[str, int]:
-        counts = self.movies[column].value_counts()
-        return {str(k): int(v) for k, v in counts.items()}
+        # Combined movie feature vector for item-to-item similarity: each block is
+        # L2-normalised and scaled by sqrt(weight), so the cosine of two combined
+        # vectors equals the weighted average of the per-block cosines.
+        blocks = []
+        for name, matrix in (
+            ("genre", csr_matrix(self.genre_matrix)),
+            ("keyword", self.text_matrix),
+            ("mood", csr_matrix(self.mood_matrix)),
+            ("language", csr_matrix(self.language_matrix)),
+        ):
+            blocks.append(normalize(matrix) * math.sqrt(ITEM_SIMILARITY_WEIGHTS[name]))
+        self.item_features = hstack(blocks).tocsr()
+        self.item_similarity = cosine_similarity(self.item_features)
 
     # ------------------------------------------------------------------ #
-    # Public helpers
+    # Catalogue helpers
     # ------------------------------------------------------------------ #
     def movie_to_dict(self, index: int) -> dict:
         row = self.movies.iloc[index]
@@ -141,85 +217,116 @@ class RecommendationEngine:
         index = self.id_to_index.get(int(movie_id))
         return None if index is None else self.movie_to_dict(index)
 
-    def search_movies(self, query: str = "", genre: str | None = None, limit: int = 20) -> list[dict]:
-        df = self.movies
-        mask = pd.Series(True, index=df.index)
-        if query:
-            q = query.strip().lower()
-            mask &= df["title"].str.lower().str.contains(q, regex=False)
+    def list_movies(self, search: str = "", genre: str | None = None, language: str | None = None,
+                    limit: int = 20, offset: int = 0) -> dict:
+        mask = np.ones(len(self.movies), dtype=bool)
+        if search:
+            mask &= self.movies["title"].str.lower().str.contains(search.strip().lower(), regex=False).to_numpy()
         if genre:
-            g = normalize_token(genre)
-            mask &= pd.Series([g in gs for gs in self.genre_sets], index=df.index)
-        matches = df[mask].sort_values(["rating", "year"], ascending=False).head(limit)
-        return [self.movie_to_dict(i) for i in matches.index]
-
-    def metadata(self) -> dict:
-        years = self.movies["year"]
-        ratings = self.movies["rating"]
+            g = self.label_lookup["genre"].get(normalize_token(genre))
+            mask &= np.array([g in gs for gs in self.genre_sets])
+        if language:
+            lang = self.label_lookup["language"].get(normalize_token(language))
+            mask &= (self.movies["language"] == lang).to_numpy()
+        indices = np.where(mask)[0]
+        # Highest rated first, then newest, then id for a stable order.
+        order = np.lexsort((self.ids[indices], -self.years[indices], -self.ratings[indices]))
+        indices = indices[order]
         return {
+            "total": int(len(indices)),
+            "limit": limit,
+            "offset": offset,
+            "items": [self.movie_to_dict(i) for i in indices[offset: offset + limit]],
+        }
+
+    @staticmethod
+    def _counts(series: pd.Series) -> dict[str, int]:
+        counts = series.explode().dropna().value_counts()
+        return {str(k): int(v) for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))}
+
+    def preference_options(self) -> dict:
+        return {
+            "genres": self._counts(self.movies["genres"]),
+            "moods": self._counts(self.movies["moods"]),
+            "languages": self._counts(self.movies["language"]),
+            "popular_keywords": dict(list(self._counts(self.movies["keywords"]).items())[:40]),
+            "year_min": int(self.years.min()),
+            "year_max": int(self.years.max()),
+            "rating_min": float(self.ratings.min()),
+            "rating_max": float(self.ratings.max()),
+            "default_weights": dict(self.score_weights),
+            "year_decay_years": YEAR_DECAY_YEARS,
+            "default_top_n": DEFAULT_TOP_N,
+            "max_top_n": MAX_TOP_N,
+        }
+
+    def dataset_info(self) -> dict:
+        return {
+            **DATASET_INFO,
             "total_movies": len(self.movies),
+            "genres": len(self.genre_encoder.classes_),
+            "moods": len(self.mood_encoder.classes_),
+            "languages": len(self.language_encoder.classes_),
             "vocabulary_size": len(self.feature_names),
-            "genres": self.all_genres,
-            "moods": self.all_moods,
-            "popular_keywords": dict(list(self.all_keywords.items())[:40]),
-            "languages": self.all_languages,
-            "year_min": int(years.min()),
-            "year_max": int(years.max()),
-            "rating_min": float(ratings.min()),
-            "rating_max": float(ratings.max()),
-            "score_weights": self.score_weights,
-            "field_weights": FIELD_WEIGHTS,
+            "year_range": [int(self.years.min()), int(self.years.max())],
         }
 
     # ------------------------------------------------------------------ #
-    # Step 3: user profile construction
+    # Step 2: user profile
     # ------------------------------------------------------------------ #
-    def _resolve(self, values: list[str], known: dict[str, int]) -> tuple[list[str], list[str]]:
-        """Match user-supplied labels against known labels case-insensitively."""
-        lookup = {normalize_token(k): k for k in known}
+    def _resolve_labels(self, kind: str, values: list[str]) -> list[str]:
+        lookup = self.label_lookup[kind]
         resolved, unknown = [], []
-        for v in values:
-            label = lookup.get(normalize_token(v))
-            if label and label not in resolved:
-                resolved.append(label)
-            elif not label:
-                unknown.append(v)
-        return resolved, unknown
-
-    def _build_profile(self, genres, moods, keywords, liked_indices, warnings) -> np.ndarray:
-        components: list[np.ndarray] = []
-
-        tokens: list[str] = []
-        tokens += [normalize_token(g) for g in genres] * FIELD_WEIGHTS["genres"]
-        tokens += [normalize_token(m) for m in moods] * FIELD_WEIGHTS["moods"]
-        for kw in keywords:
-            # Add the squashed tag ("timetravel") and the raw words ("time travel")
-            # so a keyword can match both tags and overview text.
-            tokens += [normalize_token(kw)] * FIELD_WEIGHTS["keywords"]
-            tokens.append(kw.lower())
-
-        if tokens:
-            explicit = self.vectorizer.transform([" ".join(tokens)])
-            if explicit.nnz:
-                components.append(normalize(explicit).toarray()[0])
-            else:
-                warnings.append("None of your genres, moods or keywords appear in the dataset vocabulary.")
-
-        if liked_indices:
-            liked = np.asarray(self.tfidf_matrix[liked_indices].mean(axis=0)).ravel()
-            components.append(normalize(liked.reshape(1, -1))[0])
-
-        if not components:
-            raise EmptyPreferencesError(
-                "Select at least one genre, mood, keyword or favourite movie to build your taste profile."
+        for value in unique(values):
+            label = lookup.get(normalize_token(value))
+            (resolved if label else unknown).append(label or value)
+        if unknown:
+            raise InvalidPreferenceError(
+                f"Unknown {kind}{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}. "
+                f"Valid options: {', '.join(sorted(lookup.values()))}"
             )
+        return resolved
 
-        # Equal blend of "what you told us" and "what you liked", then re-normalise.
-        profile = np.mean(components, axis=0)
-        return normalize(profile.reshape(1, -1))[0]
+    def _resolve_ids(self, ids: list[int], what: str) -> list[int]:
+        indices, unknown = [], []
+        for mid in unique(ids):
+            idx = self.id_to_index.get(int(mid))
+            if idx is None:
+                unknown.append(str(mid))
+            else:
+                indices.append(idx)
+        if unknown:
+            raise InvalidPreferenceError(f"Unknown movie id(s) in {what}: {', '.join(unknown)}")
+        return indices
 
-    def _top_features(self, vector: np.ndarray, n: int) -> list[dict]:
-        idx = np.argsort(vector)[::-1][:n]
+    def _text_profile(self, keywords: list[str], liked: list[int], warnings: list[str]) -> np.ndarray | None:
+        parts = []
+        if keywords:
+            vec = self.vectorizer.transform([keyword_document(keywords)])
+            if vec.nnz:
+                parts.append(normalize(vec).toarray().ravel())
+            else:
+                warnings.append(
+                    f"None of the keywords ({', '.join(keywords)}) appear in the catalogue vocabulary."
+                )
+        if liked:
+            mean = np.asarray(self.text_matrix[liked].mean(axis=0)).ravel()
+            parts.append(normalize(mean.reshape(1, -1)).ravel())
+        if not parts:
+            return None
+        return normalize(np.mean(parts, axis=0).reshape(1, -1)).ravel()
+
+    def _set_scores(self, matrix: np.ndarray, encoder: MultiLabelBinarizer, target: set) -> np.ndarray:
+        """Vectorised cosine between a user multi-hot vector and every movie's vector."""
+        if not target:
+            return np.zeros(len(self.movies))
+        user = np.array([1.0 if c in target else 0.0 for c in encoder.classes_])
+        dots = matrix @ user
+        norms = np.sqrt(matrix.sum(axis=1)) * math.sqrt(user.sum())
+        return np.divide(dots, norms, out=np.zeros_like(dots), where=norms > 0)
+
+    def _top_terms(self, vector: np.ndarray, n: int) -> list[dict]:
+        idx = np.argsort(-vector, kind="stable")[:n]
         return [
             {"term": self.token_labels.get(self.feature_names[i], self.feature_names[i]),
              "weight": round(float(vector[i]), 4)}
@@ -227,185 +334,273 @@ class RecommendationEngine:
         ]
 
     # ------------------------------------------------------------------ #
-    # Steps 4-6: scoring, ranking and explanation
+    # Steps 3-6: scoring, filtering, ranking, explanation
     # ------------------------------------------------------------------ #
     def recommend(self, prefs: UserPreferences) -> dict:
         warnings: list[str] = []
+        genres = self._resolve_labels("genre", prefs.genres)
+        moods = self._resolve_labels("mood", prefs.moods)
+        languages = self._resolve_labels("language", prefs.languages)
+        keywords = unique(k for k in prefs.keywords if k and k.strip())
+        liked = self._resolve_ids(prefs.liked_movie_ids, "liked_movie_ids")
+        excluded = self._resolve_ids(prefs.exclude_movie_ids, "exclude_movie_ids")
+        has_year_pref = prefs.year_min is not None or prefs.year_max is not None
 
-        genres, unknown_g = self._resolve(prefs.genres, self.all_genres)
-        moods, unknown_m = self._resolve(prefs.moods, self.all_moods)
-        if unknown_g:
-            warnings.append(f"Ignored unknown genres: {', '.join(unknown_g)}")
-        if unknown_m:
-            warnings.append(f"Ignored unknown moods: {', '.join(unknown_m)}")
-        keywords = [k.strip() for k in prefs.keywords if k and k.strip()]
+        if not (genres or moods or languages or keywords or liked or has_year_pref):
+            raise EmptyPreferencesError(
+                "Provide at least one preference: genres, languages, moods, keywords, "
+                "liked movies or a release-year range."
+            )
 
-        liked_indices = []
-        for mid in prefs.liked_movie_ids:
-            idx = self.id_to_index.get(int(mid))
-            if idx is None:
-                warnings.append(f"Ignored unknown movie id {mid}")
-            elif idx not in liked_indices:
-                liked_indices.append(idx)
-
-        profile = self._build_profile(genres, moods, keywords, liked_indices, warnings)
-
-        # Target genre / mood sets: explicit choices win; otherwise infer them
-        # from the movies the user liked (pattern extraction from behaviour).
-        target_genres = {normalize_token(g) for g in genres}
-        target_moods = {normalize_token(m) for m in moods}
+        # Explicit choices win; otherwise infer genre / mood patterns from liked movies.
+        target_genres, target_moods = set(genres), set(moods)
         genres_inferred = moods_inferred = False
-        if not target_genres and liked_indices:
-            target_genres = set().union(*(self.genre_sets[i] for i in liked_indices))
+        if not target_genres and liked:
+            target_genres = set().union(*(self.genre_sets[i] for i in liked))
             genres_inferred = True
-        if not target_moods and liked_indices:
-            target_moods = set().union(*(self.mood_sets[i] for i in liked_indices))
+        if not target_moods and liked:
+            target_moods = set().union(*(self.mood_sets[i] for i in liked))
             moods_inferred = True
-        keyword_tokens = {normalize_token(k) for k in keywords}
+        target_languages = set(languages)
 
-        # Step 4: cosine similarity between the profile and every movie.
-        content_scores = cosine_similarity(profile.reshape(1, -1), self.tfidf_matrix).ravel()
-        genre_scores = np.array([jaccard(target_genres, gs) for gs in self.genre_sets])
-        mood_scores = np.array([jaccard(target_moods, ms) for ms in self.mood_sets])
+        # --- component scores, all in [0, 1] ---------------------------------
+        text_profile = self._text_profile(keywords, liked, warnings)
+        if text_profile is not None:
+            keyword_raw = cosine_similarity(text_profile.reshape(1, -1), self.text_matrix).ravel()
+        else:
+            keyword_raw = np.zeros(len(self.movies))
+        best_text = float(keyword_raw.max())
+        # Max-normalisation: raw TF-IDF cosines are small (typically < 0.5) while
+        # genre/mood cosines reach 1, so the best text match in the catalogue is scaled to 1.
+        keyword_scores = keyword_raw / best_text if best_text > 0 else keyword_raw
 
-        # Step 5: hybrid score using only the components that have a signal.
-        active = {"content": True, "genre": bool(target_genres), "mood": bool(target_moods), "quality": True}
-        raw = {k: w for k, w in self.score_weights.items() if active[k]}
-        total = sum(raw.values())
-        weights = {k: (raw.get(k, 0.0) / total) for k in self.score_weights}
-
-        component_scores = {
-            "content": content_scores,
-            "genre": genre_scores,
-            "mood": mood_scores,
-            "quality": self.quality_scores,
+        scores = {
+            "genre": self._set_scores(self.genre_matrix, self.genre_encoder, target_genres),
+            "language": self._set_scores(self.language_matrix, self.language_encoder, target_languages)
+            if target_languages else np.zeros(len(self.movies)),
+            "mood": self._set_scores(self.mood_matrix, self.mood_encoder, target_moods),
+            "keyword": keyword_scores,
+            "year": np.array([year_score(y, prefs.year_min, prefs.year_max) for y in self.years])
+            if has_year_pref else np.zeros(len(self.movies)),
         }
-        final_scores = sum(weights[k] * component_scores[k] for k in weights)
+        # Language is a match / no-match indicator, not a cosine over all chosen languages.
+        if target_languages:
+            scores["language"] = (scores["language"] > 0).astype(float)
+        raw_scores = {**scores, "keyword": keyword_raw}
 
-        # Hard filters.
+        active = {
+            "genre": bool(target_genres),
+            "language": bool(target_languages),
+            "mood": bool(target_moods),
+            "keyword": best_text > 0,
+            "year": has_year_pref,
+        }
+        # A preference applied as a hard filter is constant (1.0) for every remaining
+        # movie, so it would only inflate scores. It is scored only when it is the
+        # user's sole preference (then ranking falls back to the tie-breakers).
+        for component, strict in (("language", prefs.strict_languages), ("year", prefs.strict_years)):
+            others = any(v for c, v in active.items() if c != component)
+            if strict and active[component] and others:
+                active[component] = False
+        base_weights = {**self.score_weights, **(prefs.weights or {})}
+        profile = self._profile_summary(
+            target_genres, target_moods, target_languages, keywords, liked, prefs,
+            genres_inferred, moods_inferred, text_profile, active, None,
+        )
+
+        if not any(active.values()):
+            return self._empty_result(
+                profile, warnings, {"total": len(self.movies)},
+                "None of your preferences match anything in the catalogue.",
+            )
+
+        weights = normalize_weights(base_weights, active)
+        profile["weights"] = {c: round(w, 4) for c, w in weights.items()}
+        final = sum(weights[c] * scores[c] for c in COMPONENTS)
+        final = np.round(final, SCORE_DECIMALS)
+
+        # --- hard filters -----------------------------------------------------
         mask = np.ones(len(self.movies), dtype=bool)
-        years = self.movies["year"].to_numpy()
-        if prefs.year_min is not None:
-            mask &= years >= prefs.year_min
-        if prefs.year_max is not None:
-            mask &= years <= prefs.year_max
-        if prefs.min_rating:
-            mask &= self.movies["rating"].to_numpy() >= prefs.min_rating
-        if prefs.languages:
-            wanted = {normalize_token(lang) for lang in prefs.languages}
-            mask &= np.array([normalize_token(lang) in wanted for lang in self.movies["language"]])
-        mask[liked_indices] = False  # never recommend what the user already loves
+        report = {"total": int(mask.sum())}
+        if prefs.min_rating > 0:
+            mask &= self.ratings >= prefs.min_rating
+            report["after_min_rating"] = int(mask.sum())
+        if prefs.strict_years and has_year_pref:
+            lo = prefs.year_min if prefs.year_min is not None else -10**9
+            hi = prefs.year_max if prefs.year_max is not None else 10**9
+            mask &= (self.years >= lo) & (self.years <= hi)
+            report["after_year_range"] = int(mask.sum())
+        if prefs.strict_languages and target_languages:
+            mask &= np.isin(self.movies["language"].to_numpy(), list(target_languages))
+            report["after_languages"] = int(mask.sum())
+        if liked or excluded:
+            mask[liked + excluded] = False
+            report["after_exclusions"] = int(mask.sum())
+        mask &= final > 0
+        report["with_positive_score"] = int(mask.sum())
 
         candidates = np.where(mask)[0]
-        ranked = candidates[np.argsort(final_scores[candidates])[::-1]][: prefs.top_n]
+        if len(candidates) == 0:
+            return self._empty_result(profile, warnings, report, self._no_match_message(report, prefs))
 
-        recommendations = []
-        for rank, i in enumerate(ranked, start=1):
-            breakdown = {
-                k: {
-                    "score": round(float(component_scores[k][i]), 4),
-                    "weight": round(weights[k], 4),
-                    "contribution": round(float(weights[k] * component_scores[k][i]), 4),
+        # --- deterministic ranking: score desc, rating desc, movie_id asc --------
+        order = np.lexsort((self.ids[candidates], -self.ratings[candidates], -final[candidates]))
+        ranked = candidates[order][: prefs.top_n]
+
+        recommendations, seen = [], set()
+        for i in ranked:
+            movie_id = int(self.ids[i])
+            if movie_id in seen:  # defensive: indices are unique, but never emit duplicates
+                continue
+            seen.add(movie_id)
+            components = {
+                c: {
+                    "value": round(float(scores[c][i]), 4),
+                    "raw": round(float(raw_scores[c][i]), 4),
+                    "weight": round(weights[c], 4),
+                    "contribution": round(float(weights[c] * scores[c][i]), 4),
+                    "active": active[c],
                 }
-                for k in weights
+                for c in COMPONENTS
             }
+            matched = self._matched(i, target_genres, target_moods, target_languages, keywords, prefs, has_year_pref)
             recommendations.append({
-                "rank": rank,
+                "rank": len(recommendations) + 1,
+                "movie_id": movie_id,
+                "title": self.movies.iloc[i]["title"],
                 "movie": self.movie_to_dict(i),
-                "score": round(float(final_scores[i]), 4),
-                "match_percent": int(round(float(final_scores[i]) * 100)),
-                "score_breakdown": breakdown,
-                "explanation": self._explain(
-                    i, profile, target_genres, target_moods, keyword_tokens, liked_indices
-                ),
+                "score": round(float(final[i]), 4),
+                "components": components,
+                "matched": matched,
+                "reasons": self._reasons(i, components, matched, liked, prefs,
+                                         target_genres, target_moods, genres_inferred, moods_inferred),
+                "top_terms": self._shared_terms(text_profile, i) if text_profile is not None else [],
+                "similar_to": self._similar_liked(i, liked),
             })
-
-        if not recommendations:
-            warnings.append("No movies match your filters. Try widening the year range, rating or languages.")
 
         return {
             "recommendations": recommendations,
-            "profile": {
-                "top_terms": self._top_features(profile, 12),
-                "genres": sorted(self.token_labels.get(g, g) for g in target_genres),
-                "moods": sorted(self.token_labels.get(m, m) for m in target_moods),
-                "genres_inferred": genres_inferred,
-                "moods_inferred": moods_inferred,
-                "liked_movies": [
-                    {"movie_id": int(self.movies.iloc[i]["movie_id"]), "title": self.movies.iloc[i]["title"]}
-                    for i in liked_indices
-                ],
-                "weights": {k: round(v, 4) for k, v in weights.items()},
-            },
-            "candidates_considered": int(len(candidates)),
+            "profile": profile,
+            "filter_report": report,
             "total_movies": len(self.movies),
+            "message": None,
             "warnings": warnings,
         }
 
-    def _shared_features(self, vector_a: np.ndarray, index_b: int, n: int = 5) -> list[str]:
-        """Terms that contribute most to the cosine similarity (largest a_i * b_i)."""
-        b = self.tfidf_matrix[index_b].toarray().ravel()
-        product = vector_a * b
-        top = np.argsort(product)[::-1][:n]
+    # ------------------------------------------------------------------ #
+    # Result helpers
+    # ------------------------------------------------------------------ #
+    def _profile_summary(self, genres, moods, languages, keywords, liked, prefs,
+                         genres_inferred, moods_inferred, text_profile, active, weights) -> dict:
+        return {
+            "genres": sorted(genres),
+            "moods": sorted(moods),
+            "languages": sorted(languages),
+            "keywords": keywords,
+            "year_min": prefs.year_min,
+            "year_max": prefs.year_max,
+            "min_rating": prefs.min_rating,
+            "genres_inferred": genres_inferred,
+            "moods_inferred": moods_inferred,
+            "liked_movies": [{"movie_id": int(self.ids[i]), "title": self.movies.iloc[i]["title"]} for i in liked],
+            "top_terms": self._top_terms(text_profile, 12) if text_profile is not None else [],
+            "active_components": [c for c in COMPONENTS if active[c]],
+            "weights": weights or {c: 0.0 for c in COMPONENTS},
+        }
+
+    def _empty_result(self, profile, warnings, report, message) -> dict:
+        return {
+            "recommendations": [],
+            "profile": profile,
+            "filter_report": report,
+            "total_movies": len(self.movies),
+            "message": message,
+            "warnings": warnings,
+        }
+
+    @staticmethod
+    def _no_match_message(report: dict, prefs: UserPreferences) -> str:
+        steps = [
+            ("after_min_rating", f"a minimum rating of {prefs.min_rating:g}"),
+            ("after_year_range", "the strict release-year range"),
+            ("after_languages", "the strict language filter"),
+            ("after_exclusions", "excluding movies you already liked"),
+        ]
+        for key, label in steps:
+            if report.get(key) == 0:
+                return f"No movies remain after applying {label}. Try relaxing that filter."
+        return "No movies match any of your preferences. Try broader genres, moods or keywords."
+
+    def _matched(self, i, genres, moods, languages, keywords, prefs, has_year_pref) -> dict:
+        movie = self.movies.iloc[i]
+        user_tokens = [normalize_token(k) for k in keywords]
+        matched_keywords = [
+            kw for kw in movie["keywords"]
+            if any(
+                t == normalize_token(kw)
+                or (len(t) >= 4 and (t in normalize_token(kw) or normalize_token(kw) in t))
+                for t in user_tokens
+            )
+        ]
+        return {
+            "genres": [g for g in movie["genres"] if g in genres],
+            "moods": [m for m in movie["moods"] if m in moods],
+            "language": movie["language"] if movie["language"] in languages else None,
+            "keywords": matched_keywords,
+            "year_in_range": (year_score(int(movie["year"]), prefs.year_min, prefs.year_max) == 1.0)
+            if has_year_pref else None,
+        }
+
+    def _reasons(self, i, components, matched, liked, prefs, genres, moods,
+                 genres_inferred, moods_inferred) -> list[str]:
+        movie = self.movies.iloc[i]
+        sentences = {}
+        if components["genre"]["active"] and matched["genres"]:
+            source = "genres from movies you liked" if genres_inferred else "your genres"
+            sentences["genre"] = (
+                f"Genre match ({len(matched['genres'])}/{len(genres)} of {source}): {', '.join(matched['genres'])}"
+            )
+        if components["mood"]["active"] and matched["moods"]:
+            source = "moods from movies you liked" if moods_inferred else "your moods"
+            sentences["mood"] = (
+                f"Mood match ({len(matched['moods'])}/{len(moods)} of {source}): {', '.join(matched['moods'])}"
+            )
+        if components["language"]["active"] and matched["language"]:
+            sentences["language"] = f"In your preferred language: {matched['language']}"
+        if components["keyword"]["active"] and components["keyword"]["value"] > 0:
+            if matched["keywords"]:
+                sentences["keyword"] = f"Shares your themes: {', '.join(matched['keywords'])}"
+            elif liked:
+                sentences["keyword"] = "Keywords and description resemble the movies you liked"
+            else:
+                sentences["keyword"] = "Description is related to your keywords"
+        if components["year"]["active"]:
+            year = int(movie["year"])
+            if matched["year_in_range"]:
+                sentences["year"] = f"Released in {year}, inside your preferred years"
+            elif components["year"]["value"] > 0:
+                sentences["year"] = f"Released in {year}, close to your preferred years"
+        # Most influential component first.
+        order = sorted(sentences, key=lambda c: (-components[c]["contribution"], COMPONENTS.index(c)))
+        return [sentences[c] for c in order] or ["Closest available match to your preferences"]
+
+    def _shared_terms(self, profile: np.ndarray, i: int, n: int = 5) -> list[str]:
+        """Terms contributing most to the TF-IDF cosine (largest profile_t × movie_t)."""
+        movie_vec = self.text_matrix[i].toarray().ravel()
+        product = profile * movie_vec
+        top = np.argsort(-product, kind="stable")[:n]
         return [self.token_labels.get(self.feature_names[t], self.feature_names[t]) for t in top if product[t] > 0]
 
-    def _explain(self, i, profile, target_genres, target_moods, keyword_tokens, liked_indices) -> dict:
-        movie = self.movies.iloc[i]
-        label = self.token_labels.get
-
-        matched_genres = [g for g in movie["genres"] if normalize_token(g) in target_genres]
-        matched_moods = [m for m in movie["moods"] if normalize_token(m) in target_moods]
-        matched_keywords = [
-            k for k in movie["keywords"]
-            if any(t == normalize_token(k) or (len(t) >= 4 and t in normalize_token(k)) for t in keyword_tokens)
-        ]
-
-        similar_to = None
-        if liked_indices:
-            sims = self.item_similarity[i, liked_indices]
-            best = int(np.argmax(sims))
-            j = liked_indices[best]
-            if sims[best] > 0.05:
-                liked_row = self.movies.iloc[j]
-                similar_to = {
-                    "movie_id": int(liked_row["movie_id"]),
-                    "title": liked_row["title"],
-                    "similarity": round(float(sims[best]), 4),
-                    "shared_director": movie["director"] == liked_row["director"],
-                    "shared_cast": sorted(
-                        label(c, c) for c in self.cast_sets[i] & self.cast_sets[j]
-                    ),
-                    "shared_keywords": sorted(
-                        label(k, k) for k in self.keyword_sets[i] & self.keyword_sets[j]
-                    ),
-                }
-
-        reasons: list[str] = []
-        if matched_genres:
-            reasons.append(f"Matches your genres: {', '.join(matched_genres)}")
-        if matched_moods:
-            reasons.append(f"Fits the mood you want: {', '.join(matched_moods)}")
-        if matched_keywords:
-            reasons.append(f"Covers your themes: {', '.join(matched_keywords)}")
-        if similar_to:
-            reason = f"{round(similar_to['similarity'] * 100)}% similar to {similar_to['title']}, which you liked"
-            if similar_to["shared_director"]:
-                reason += f" (same director: {movie['director']})"
-            reasons.append(reason)
-            if similar_to["shared_cast"]:
-                reasons.append(f"Shares cast with {similar_to['title']}: {', '.join(similar_to['shared_cast'])}")
-        if movie["rating"] >= 8.0:
-            reasons.append(f"Highly rated ({movie['rating']:.1f}/10)")
-        if not reasons:
-            reasons.append("Closest overall match to your taste profile")
-
+    def _similar_liked(self, i: int, liked: list[int]) -> dict | None:
+        if not liked:
+            return None
+        sims = self.item_similarity[i, liked]
+        best = int(np.argmax(sims))
+        j = liked[best]
         return {
-            "reasons": reasons,
-            "matched_genres": matched_genres,
-            "matched_moods": matched_moods,
-            "matched_keywords": matched_keywords,
-            "shared_features": self._shared_features(profile, i),
-            "similar_to": similar_to,
+            "movie_id": int(self.ids[j]),
+            "title": self.movies.iloc[j]["title"],
+            "similarity": round(float(sims[best]), 4),
         }
 
     # ------------------------------------------------------------------ #
@@ -415,24 +610,24 @@ class RecommendationEngine:
         i = self.id_to_index.get(int(movie_id))
         if i is None:
             return None
-        sims = self.item_similarity[i].copy()
-        sims[i] = -1.0  # exclude the movie itself
-        source_vector = self.tfidf_matrix[i].toarray().ravel()
+        sims = np.round(self.item_similarity[i], SCORE_DECIMALS)
+        candidates = np.array([j for j in range(len(self.movies)) if j != i])
+        order = np.lexsort((self.ids[candidates], -self.ratings[candidates], -sims[candidates]))
         source = self.movies.iloc[i]
-        label = self.token_labels.get
 
         results = []
-        for j in np.argsort(sims)[::-1][:top_n]:
+        for j in candidates[order][:top_n]:
             target = self.movies.iloc[j]
             results.append({
                 "movie": self.movie_to_dict(j),
                 "similarity": round(float(sims[j]), 4),
-                "match_percent": int(round(float(sims[j]) * 100)),
-                "shared_genres": [g for g in target["genres"] if normalize_token(g) in self.genre_sets[i]],
-                "shared_moods": [m for m in target["moods"] if normalize_token(m) in self.mood_sets[i]],
-                "shared_keywords": sorted(label(k, k) for k in self.keyword_sets[i] & self.keyword_sets[j]),
-                "shared_cast": sorted(label(c, c) for c in self.cast_sets[i] & self.cast_sets[j]),
-                "shared_director": source["director"] == target["director"],
-                "shared_features": self._shared_features(source_vector, j),
+                "shared_genres": [g for g in target["genres"] if g in self.genre_sets[i]],
+                "shared_moods": [m for m in target["moods"] if m in self.mood_sets[i]],
+                "shared_keywords": sorted(
+                    self.token_labels.get(k, k) for k in self.keyword_tokens[i] & self.keyword_tokens[j]
+                ),
+                "same_language": source["language"] == target["language"],
+                "same_director": source["director"] == target["director"],
+                "shared_cast": sorted(self.cast_sets[i] & self.cast_sets[j]),
             })
         return results

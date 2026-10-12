@@ -10,7 +10,7 @@ async function request(path, options = {}) {
       ...options,
     });
   } catch {
-    throw new Error('Cannot reach the recommendation server. Is the backend running on port 8000?');
+    throw new Error('Cannot reach the recommendation server. Is the backend running?');
   }
 
   if (!response.ok) {
@@ -29,9 +29,10 @@ async function request(path, options = {}) {
 
 export const api = {
   health: () => request('/health'),
-  meta: () => request('/meta'),
+  dataset: () => request('/dataset'),
+  options: () => request('/preferences/options'),
   searchMovies: (search, limit = 8) =>
-    request(`/movies?${new URLSearchParams({ search, limit: String(limit) })}`),
+    request(`/movies?${new URLSearchParams({ search, limit: String(limit) })}`).then((page) => page.items),
   similar: (movieId, topN = 6) => request(`/movies/${movieId}/similar?top_n=${topN}`),
-  recommend: (payload) => request('/recommend', { method: 'POST', body: JSON.stringify(payload) }),
+  recommend: (payload) => request('/recommendations', { method: 'POST', body: JSON.stringify(payload) }),
 };

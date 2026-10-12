@@ -6,7 +6,7 @@ import ScoreBreakdown from './ScoreBreakdown.jsx';
 
 export default function MovieCard({ rec, isLiked, onToggleLike, onOpen }) {
   const [showMath, setShowMath] = useState(false);
-  const { movie, explanation } = rec;
+  const { movie, matched } = rec;
 
   return (
     <article className="movie-card">
@@ -24,29 +24,29 @@ export default function MovieCard({ rec, isLiked, onToggleLike, onOpen }) {
               </button>
             </h3>
             <div className="meta-row">
-              <span>{movie.year}</span>
-              <span>
+              <span className={matched.year_in_range ? 'meta-match' : ''}>{movie.year}</span>
+              <span title="Approximate rating (unverified)">
                 <Star size={12} fill="currentColor" className="star" /> {movie.rating.toFixed(1)}
               </span>
               <span>
                 <Clock size={12} /> {movie.runtime}m
               </span>
-              <span>
+              <span className={matched.language ? 'meta-match' : ''}>
                 <Globe size={12} /> {movie.language}
               </span>
             </div>
           </div>
-          <ScoreRing value={rec.match_percent} />
+          <ScoreRing score={rec.score} />
         </div>
 
         <div className="tag-row">
           {movie.genres.map((g) => (
-            <span key={g} className={`tag ${explanation.matched_genres.includes(g) ? 'tag-match' : ''}`}>
+            <span key={g} className={`tag ${matched.genres.includes(g) ? 'tag-match' : ''}`}>
               {g}
             </span>
           ))}
           {movie.moods.map((m) => (
-            <span key={m} className={`tag tag-mood ${explanation.matched_moods.includes(m) ? 'tag-match' : ''}`}>
+            <span key={m} className={`tag tag-mood ${matched.moods.includes(m) ? 'tag-match' : ''}`}>
               {m}
             </span>
           ))}
@@ -57,13 +57,19 @@ export default function MovieCard({ rec, isLiked, onToggleLike, onOpen }) {
             <Lightbulb size={14} /> Why this movie?
           </div>
           <ul>
-            {explanation.reasons.slice(0, 4).map((r) => (
+            {rec.reasons.slice(0, 4).map((r) => (
               <li key={r}>{r}</li>
             ))}
+            {rec.similar_to && (
+              <li>
+                Closest to <strong>{rec.similar_to.title}</strong>, which you liked (similarity{' '}
+                {rec.similar_to.similarity.toFixed(2)})
+              </li>
+            )}
           </ul>
-          {explanation.shared_features.length > 0 && (
+          {rec.top_terms.length > 0 && (
             <p className="signals">
-              Strongest shared signals: <strong>{explanation.shared_features.join(' · ')}</strong>
+              Strongest shared TF-IDF terms: <strong>{rec.top_terms.join(' · ')}</strong>
             </p>
           )}
         </div>
@@ -71,7 +77,7 @@ export default function MovieCard({ rec, isLiked, onToggleLike, onOpen }) {
         <div className="card-actions">
           <button type="button" className="btn btn-small btn-ghost" onClick={() => setShowMath((s) => !s)}>
             {showMath ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
-            Score breakdown
+            Score components
           </button>
           <button
             type="button"
@@ -83,7 +89,7 @@ export default function MovieCard({ rec, isLiked, onToggleLike, onOpen }) {
           </button>
         </div>
 
-        {showMath && <ScoreBreakdown breakdown={rec.score_breakdown} total={rec.score} />}
+        {showMath && <ScoreBreakdown components={rec.components} total={rec.score} />}
       </div>
     </article>
   );

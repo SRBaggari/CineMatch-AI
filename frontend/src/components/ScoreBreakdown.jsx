@@ -1,28 +1,30 @@
-const LABELS = {
-  content: { name: 'Content similarity', help: 'Cosine similarity of TF-IDF vectors' },
-  genre: { name: 'Genre overlap', help: 'Jaccard index of genres' },
-  mood: { name: 'Mood overlap', help: 'Jaccard index of moods' },
-  quality: { name: 'Quality', help: 'Normalised rating' },
-};
+import { COMPONENTS, COMPONENT_INFO } from '../utils/components.js';
 
-export default function ScoreBreakdown({ breakdown, total }) {
+export default function ScoreBreakdown({ components, total }) {
   return (
     <div className="breakdown">
-      {Object.entries(breakdown).map(([key, part]) => (
-        <div key={key} className={`breakdown-row ${part.weight === 0 ? 'inactive' : ''}`} title={LABELS[key]?.help}>
-          <div className="breakdown-label">
-            <span>{LABELS[key]?.name ?? key}</span>
-            <span className="muted">
-              {part.score.toFixed(2)} × {part.weight.toFixed(2)} = <strong>{part.contribution.toFixed(3)}</strong>
-            </span>
+      {COMPONENTS.map((key) => {
+        const part = components[key];
+        return (
+          <div key={key} className={`breakdown-row ${part.active ? '' : 'inactive'}`} title={COMPONENT_INFO[key].help}>
+            <div className="breakdown-label">
+              <span>
+                {COMPONENT_INFO[key].label}
+                {!part.active && <span className="muted"> (not used)</span>}
+                {key === 'keyword' && part.active && <span className="muted"> · raw cosine {part.raw.toFixed(3)}</span>}
+              </span>
+              <span className="muted">
+                {part.value.toFixed(2)} × {part.weight.toFixed(2)} = <strong>{part.contribution.toFixed(3)}</strong>
+              </span>
+            </div>
+            <div className="bar">
+              <div className={`bar-fill bar-${key}`} style={{ width: `${Math.min(100, part.value * 100)}%` }} />
+            </div>
           </div>
-          <div className="bar">
-            <div className={`bar-fill bar-${key}`} style={{ width: `${Math.min(100, part.score * 100)}%` }} />
-          </div>
-        </div>
-      ))}
+        );
+      })}
       <div className="breakdown-total">
-        Final score <strong>{total.toFixed(3)}</strong>
+        Relevance score <strong>{total.toFixed(3)}</strong>
       </div>
     </div>
   );
