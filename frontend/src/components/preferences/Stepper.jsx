@@ -13,7 +13,12 @@ export default function Stepper({ steps, current, onSelect }) {
           const state = index === current ? 'is-current' : step.done ? 'is-done' : '';
           return (
             <li key={step.id} className={state}>
-              <button type="button" onClick={() => onSelect(index)} aria-current={index === current ? 'step' : undefined}>
+              <button
+                type="button"
+                onClick={() => onSelect(index)}
+                aria-current={index === current ? 'step' : undefined}
+                aria-label={`Step ${index + 1}: ${step.title}${step.done ? ' (done)' : ''}`}
+              >
                 <span className="step-dot">{step.done && index !== current ? <Check size={14} strokeWidth={3} /> : index + 1}</span>
                 <span className="step-label">
                   {step.title}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronDown, LoaderCircle, RotateCcw, Search, SearchX, Star, X } from 'lucide-react';
 import { api } from '../api/client.js';
@@ -61,7 +61,7 @@ export default function BrowsePage() {
   const yearRange = years ?? (options ? [options.year_min, options.year_max] : null);
   const usePrefs = personal && ready;
 
-  const request = useMemo(() => {
+  const filters = useMemo(() => {
     if (!options) return null;
     return {
       query: debouncedQuery,
@@ -71,30 +71,38 @@ export default function BrowsePage() {
       year_max: yearRange[1] < options.year_max ? yearRange[1] : null,
       sort,
       preferences: usePrefs ? payload : null,
-      limit: PAGE_SIZE * page,
-      offset: 0,
     };
-  }, [options, debouncedQuery, genres, languages, yearRange, sort, usePrefs, payload, page]);
-  const requestKey = request ? JSON.stringify(request) : '';
+  }, [options, debouncedQuery, genres, languages, yearRange, sort, usePrefs, payload]);
+  const filterKey = filters ? JSON.stringify(filters) : '';
+  // Filters, feedback (part of personalised relevance) and retries all restart at page 1.
+  const queryKey = `${filterKey}|${feedbackVersion}|${retry}`;
+  const lastQueryKey = useRef(null);
 
+  // One page per request (offset + limit), appended for "Show more".
   useEffect(() => {
-    if (!requestKey) return undefined;
+    if (!filterKey) return undefined;
+    if (lastQueryKey.current !== queryKey && page !== 1) {
+      setPage(1); // re-runs this effect for the first page of the new query
+      return undefined;
+    }
+    lastQueryKey.current = queryKey;
     let cancelled = false;
     setState((s) => ({ ...s, loading: true, error: '' }));
     api
-      .search(JSON.parse(requestKey))
-      .then((data) => !cancelled && setState({ items: data.items, total: data.total, loading: false, error: '', personalized: data.personalized }))
+      .search({ ...JSON.parse(filterKey), limit: PAGE_SIZE, offset: (page - 1) * PAGE_SIZE })
+      .then((data) => {
+        if (cancelled) return;
+        setState((s) => {
+          const seen = new Set(page === 1 ? [] : s.items.map((i) => i.movie.movie_id));
+          const items = page === 1 ? data.items : [...s.items, ...data.items.filter((i) => !seen.has(i.movie.movie_id))];
+          return { items, total: data.total, loading: false, error: '', personalized: data.personalized };
+        });
+      })
       .catch((e) => !cancelled && setState((s) => ({ ...s, loading: false, error: e.message })));
     return () => {
       cancelled = true;
     };
-    // feedbackVersion: personalised relevance includes feedback, so re-query after changes.
-  }, [requestKey, feedbackVersion, retry]);
-
-  // Any filter change starts again from the first page.
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedQuery, genres, languages, years, sort, usePrefs]);
+  }, [filterKey, queryKey, page]);
 
   if (!options) {
     return (

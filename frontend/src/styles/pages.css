@@ -46,11 +46,16 @@
   font-weight: 700;
 }
 
+.hero > * {
+  min-width: 0; /* let grid items shrink below their content width */
+}
+
 .hero-visual {
   position: relative;
   display: grid;
   place-items: center;
   min-height: 440px;
+  overflow: hidden; /* the stack is scaled on phones; transforms don't shrink layout size */
 }
 
 .hero-orb {

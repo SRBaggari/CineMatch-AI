@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Plus, Tag, X } from 'lucide-react';
 
-export default function KeywordInput({ keywords, suggestions, onAdd, onRemove }) {
+export default function KeywordInput({ keywords, suggestions, onAdd, onRemove, limit = Infinity }) {
   const [value, setValue] = useState('');
+  const full = keywords.length >= limit;
 
   const submit = () => {
     const keyword = value.trim();
@@ -20,7 +21,8 @@ export default function KeywordInput({ keywords, suggestions, onAdd, onRemove })
           type="text"
           value={value}
           maxLength={60}
-          placeholder="Type a theme, e.g. time travel, and press Enter"
+          disabled={full}
+          placeholder={full ? `Maximum of ${limit} themes reached` : 'Type a theme, e.g. time travel, and press Enter'}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
@@ -30,7 +32,7 @@ export default function KeywordInput({ keywords, suggestions, onAdd, onRemove })
           }}
           aria-label="Add a movie theme"
         />
-        <button type="button" className="icon-btn" onClick={submit} aria-label="Add theme" disabled={!value.trim()}>
+        <button type="button" className="icon-btn" onClick={submit} aria-label="Add theme" disabled={full || !value.trim()}>
           <Plus size={18} />
         </button>
       </div>
@@ -51,7 +53,7 @@ export default function KeywordInput({ keywords, suggestions, onAdd, onRemove })
       <p className="field-label">Popular themes in the catalogue</p>
       <div className="suggestions">
         {unused.map((s) => (
-          <button key={s} type="button" className="suggestion" onClick={() => onAdd(s)}>
+          <button key={s} type="button" className="suggestion" onClick={() => onAdd(s)} disabled={full}>
             <Plus size={12} /> {s}
           </button>
         ))}

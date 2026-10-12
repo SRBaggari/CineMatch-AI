@@ -1,6 +1,8 @@
 """HTTP endpoints. All routes are mounted under the /api prefix in main.py."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response
 
 from . import __version__
 from .analytics import build_analytics
@@ -31,6 +33,9 @@ from .schemas import (
 from .store import UNSET, Store
 
 router = APIRouter()
+
+# Positive ids that fit SQLite's 64-bit INTEGER; anything else is a 422, never a 500.
+MovieId = Annotated[int, Path(ge=1, le=2**63 - 1)]
 
 
 def get_engine(request: Request) -> RecommendationEngine:
@@ -112,7 +117,7 @@ def search_movies(
 
 
 @router.get("/movies/{movie_id}", response_model=Movie, tags=["movies"])
-def get_movie(movie_id: int, engine: RecommendationEngine = Depends(get_engine)):
+def get_movie(movie_id: MovieId, engine: RecommendationEngine = Depends(get_engine)):
     movie = engine.get_movie(movie_id)
     if movie is None:
         raise HTTPException(status_code=404, detail=f"Movie {movie_id} not found")
@@ -121,7 +126,7 @@ def get_movie(movie_id: int, engine: RecommendationEngine = Depends(get_engine))
 
 @router.get("/movies/{movie_id}/similar", response_model=SimilarMoviesResponse, tags=["recommendations"])
 def similar_movies(
-    movie_id: int,
+    movie_id: MovieId,
     top_n: int = Query(8, ge=1, le=30),
     engine: RecommendationEngine = Depends(get_engine),
 ):
@@ -152,7 +157,7 @@ def recommend(
 
 @router.post("/movies/{movie_id}/explain", response_model=MovieExplanation, tags=["recommendations"])
 def explain_movie(
-    movie_id: int,
+    movie_id: MovieId,
     payload: RecommendationRequest,
     engine: RecommendationEngine = Depends(get_engine),
     store: Store = Depends(get_store),
@@ -190,7 +195,7 @@ def list_feedback(engine: RecommendationEngine = Depends(get_engine), store: Sto
 
 @router.put("/feedback/{movie_id}", response_model=FeedbackState, tags=["feedback"])
 def update_feedback(
-    movie_id: int,
+    movie_id: MovieId,
     payload: FeedbackUpdate,
     engine: RecommendationEngine = Depends(get_engine),
     store: Store = Depends(get_store),
@@ -208,7 +213,7 @@ def update_feedback(
 
 
 @router.delete("/feedback/{movie_id}", status_code=204, tags=["feedback"])
-def delete_feedback(movie_id: int, store: Store = Depends(get_store)):
+def delete_feedback(movie_id: MovieId, store: Store = Depends(get_store)):
     store.clear_feedback(movie_id)
     return Response(status_code=204)
 

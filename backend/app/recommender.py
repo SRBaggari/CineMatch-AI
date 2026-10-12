@@ -26,8 +26,11 @@ Pipeline
                                    − max similarity to disliked movies)
    score = clip(base + adjustment, 0, 1)
 6. Hard filters (minimum rating; optionally strict year range / languages),
-   exclusion of liked/excluded/disliked movies, removal of movies whose base score
-   is 0, deterministic ranking (score, rating, movie_id).
+   exclusion of the request's liked_movie_ids ("movies you love" seeds),
+   exclude_movie_ids and disliked movies, removal of movies whose base score is 0,
+   deterministic ranking (score, rating, movie_id). Movies liked or favourited via
+   feedback stay eligible on purpose ("good pick" / "save for later", not "already
+   seen"); they only boost their neighbours, never themselves.
 7. Explanation: a summary sentence built from matched attributes, matched
    preferences, reasons ordered by contribution, and the full component breakdown.
 
@@ -40,6 +43,7 @@ import json
 import logging
 import math
 import pickle
+import tempfile
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -261,7 +265,13 @@ class RecommendationEngine:
 
         documents = [keyword_document(row.keywords, row.overview) for row in self.movies.itertuples(index=False)]
         vectorizer = TfidfVectorizer(stop_words="english", sublinear_tf=True)
-        text_matrix = vectorizer.fit_transform(documents)
+        try:
+            text_matrix = vectorizer.fit_transform(documents)
+        except ValueError:
+            # Every description/keyword is blank or a stop word: no text features at all.
+            # The keyword component then simply stays inactive.
+            logger.warning("No usable keywords or descriptions; the keyword component is disabled")
+            vectorizer, text_matrix = None, csr_matrix((len(documents), 0))
 
         # Combined movie feature vector for item-to-item similarity: each block is
         # L2-normalised and scaled by sqrt(weight), so the cosine of two combined
@@ -273,7 +283,8 @@ class RecommendationEngine:
             ("mood", csr_matrix(mood_matrix)),
             ("language", csr_matrix(language_matrix)),
         ):
-            blocks.append(normalize(matrix) * math.sqrt(ITEM_SIMILARITY_WEIGHTS[name]))
+            if matrix.shape[1]:  # skip blocks with no features (e.g. no movie has any mood)
+                blocks.append(normalize(matrix) * math.sqrt(ITEM_SIMILARITY_WEIGHTS[name]))
         item_features = hstack(blocks).tocsr()
 
         return {
@@ -317,16 +328,18 @@ class RecommendationEngine:
             for stale in path.parent.glob("features-*.pkl"):
                 if stale != path:
                     stale.unlink(missing_ok=True)
-            tmp = path.with_suffix(".tmp")
-            with tmp.open("wb") as fh:
+            # Unique temp name so two server processes never write the same file.
+            with tempfile.NamedTemporaryFile("wb", dir=path.parent, suffix=".tmp", delete=False) as fh:
                 pickle.dump({"fingerprint": self.fingerprint, "features": features}, fh)
-            tmp.replace(path)
+            Path(fh.name).replace(path)
         except OSError as exc:
             logger.warning("Could not write feature cache %s: %s", path, exc)
 
     def _derive_lookups(self) -> None:
         """Cheap per-movie structures derived from the dataset (not worth caching on disk)."""
-        self.feature_names = self.vectorizer.get_feature_names_out()
+        self.feature_names = (
+            self.vectorizer.get_feature_names_out() if self.vectorizer is not None else np.array([], dtype=object)
+        )
         self.label_lookup = {
             "genre": {normalize_token(g): g for g in self.genre_encoder.classes_},
             "mood": {normalize_token(m): m for m in self.mood_encoder.classes_},
@@ -437,7 +450,9 @@ class RecommendationEngine:
     def dataset_analytics(self) -> dict:
         """Distributions computed from the catalogue itself."""
         decades = pd.Series((self.years // 10) * 10).value_counts().sort_index()
-        bins = np.arange(math.floor(self.ratings.min() * 2) / 2, self.ratings.max() + 0.5, 0.5)
+        lo = math.floor(self.ratings.min() * 2) / 2
+        # At least one 0.5-wide bin, even when every rating is identical.
+        bins = np.arange(lo, max(self.ratings.max(), lo) + 0.5 + 1e-9, 0.5)
         hist, edges = np.histogram(self.ratings, bins=bins)
         return {
             "total_movies": len(self.movies),
@@ -501,6 +516,10 @@ class RecommendationEngine:
         return result
 
     def _text_profile(self, keywords: list[str], liked: list[int], warnings: list[str]) -> np.ndarray | None:
+        if self.vectorizer is None:  # catalogue has no text features
+            if keywords:
+                warnings.append("Keywords are ignored because the catalogue has no keyword or description text.")
+            return None
         parts = []
         if keywords:
             vec = self._keyword_vector(keywords)
@@ -577,6 +596,9 @@ class RecommendationEngine:
         moods = self._resolve_labels("mood", prefs.moods)
         languages = self._resolve_labels("language", prefs.languages)
         keywords = unique(k for k in prefs.keywords if k and k.strip())
+        unusable = [k for k in prefs.keywords if k and k.strip() and not normalize_token(k)]
+        if unusable:
+            warnings.append(f"Ignored keywords without letters or digits: {', '.join(unusable)}")
         liked = self._resolve_ids(prefs.liked_movie_ids, "liked_movie_ids")
         excluded = self._resolve_ids(prefs.exclude_movie_ids, "exclude_movie_ids")
         has_year_pref = prefs.year_min is not None or prefs.year_max is not None
@@ -1048,6 +1070,16 @@ class RecommendationEngine:
         for key, label in steps:
             if report.get(key) == 0:
                 return f"No movies remain after applying {label}. Try relaxing that filter."
+        strict = [(key, toggle) for key, toggle in (("after_languages", "Only these languages"),
+                                                     ("after_year_range", "Only movies inside this range"))
+                  if key in report]
+        if strict:
+            key, toggle = strict[0]
+            n = report[key]
+            return (f"The {n} movie{'s' if n != 1 else ''} left after your strict "
+                    f"{'language' if key == 'after_languages' else 'year'} filter "
+                    f"{'match' if n != 1 else 'matches'} none of your other "
+                    f"preferences. Try turning off \"{toggle}\" or choosing broader genres.")
         return "No movies match any of your preferences. Try broader genres, moods or keywords."
 
     # ------------------------------------------------------------------ #

@@ -54,8 +54,27 @@ def split_pipe(value) -> list[str]:
     return result
 
 
+YEAR_RANGE = (1880, 2100)
+
+
+def _text(series: pd.Series, default: str) -> pd.Series:
+    """Strip text and replace missing/blank values with a default.
+
+    Done element-wise on purpose: with pandas 3's string dtype, astype(str) keeps
+    NaN as missing instead of producing the text "nan".
+    """
+    return series.map(lambda v: default if pd.isna(v) or not str(v).strip() else str(v).strip())
+
+
 def clean_movies(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate columns, coerce types, parse list columns and drop duplicates."""
+    """Validate columns, coerce types, parse list columns and drop invalid or duplicate rows.
+
+    Policy: values that identify, filter or rank a movie (id, title, year, rating) are
+    never invented. Rows where they are missing or invalid are dropped and logged.
+    Optional fields get explicit empty values: no genres/moods/keywords/cast,
+    director "Unknown", empty overview, language "Unknown", runtime 0 (= unknown).
+    The number of dropped rows per reason is kept in df.attrs["dropped"].
+    """
     missing = [col for col in REQUIRED_COLUMNS if col not in df.columns]
     if missing:
         raise ValueError(f"Dataset is missing required columns: {', '.join(missing)}")
@@ -64,16 +83,34 @@ def clean_movies(df: pd.DataFrame) -> pd.DataFrame:
     for col in LIST_COLUMNS:
         df[col] = df[col].apply(split_pipe)
 
-    df["title"] = df["title"].astype(str).str.strip()
-    df["director"] = df["director"].fillna("Unknown").astype(str).str.strip()
-    df["overview"] = df["overview"].fillna("").astype(str).str.strip()
-    df["language"] = df["language"].fillna("Unknown").astype(str).str.strip()
-    df["movie_id"] = pd.to_numeric(df["movie_id"], errors="coerce")
-    df = df.dropna(subset=["movie_id"])
-    df["movie_id"] = df["movie_id"].astype(int)
-    df["year"] = pd.to_numeric(df["year"], errors="coerce").fillna(0).astype(int)
-    df["runtime"] = pd.to_numeric(df["runtime"], errors="coerce").fillna(0).astype(int)
-    df["rating"] = pd.to_numeric(df["rating"], errors="coerce").fillna(0.0).astype(float).clip(0, 10)
+    df["title"] = _text(df["title"], "")
+    df["director"] = _text(df["director"], "Unknown")
+    df["overview"] = _text(df["overview"], "")
+    df["language"] = _text(df["language"], "Unknown")
+    movie_id = pd.to_numeric(df["movie_id"], errors="coerce")
+    year = pd.to_numeric(df["year"], errors="coerce")
+    rating = pd.to_numeric(df["rating"], errors="coerce")
+    runtime = pd.to_numeric(df["runtime"], errors="coerce")
+
+    invalid = {
+        "missing or invalid movie_id": movie_id.isna() | (movie_id < 1) | (movie_id % 1 != 0),
+        "missing title": df["title"] == "",
+        "missing or invalid year": year.isna() | ~year.between(*YEAR_RANGE) | (year % 1 != 0),
+        "missing or out-of-range rating": rating.isna() | ~rating.between(0, 10),
+    }
+    dropped: dict[str, int] = {}
+    keep = pd.Series(True, index=df.index)
+    for reason, bad in invalid.items():
+        count = int((bad & keep).sum())  # count each dropped row once, under its first reason
+        if count:
+            dropped[reason] = count
+        keep &= ~bad
+    df, movie_id, year, rating, runtime = df[keep], movie_id[keep], year[keep], rating[keep], runtime[keep]
+
+    df["movie_id"] = movie_id.astype(int)
+    df["year"] = year.astype(int)
+    df["rating"] = rating.astype(float)
+    df["runtime"] = runtime.where(runtime > 0, 0).fillna(0).astype(int)
 
     # Duplicate prevention: the same id, or the same title released in the same year.
     before = len(df)
@@ -81,9 +118,16 @@ def clean_movies(df: pd.DataFrame) -> pd.DataFrame:
     title_key = df["title"].map(normalize_token) + "|" + df["year"].astype(str)
     df = df[~title_key.duplicated(keep="first")]
     if len(df) < before:
-        logger.warning("Dropped %d duplicate movie rows", before - len(df))
+        dropped["duplicate"] = before - len(df)
 
-    return df.reset_index(drop=True)
+    if dropped:
+        logger.warning("Dropped invalid movie rows: %s", dropped)
+    if df.empty:
+        raise ValueError("Dataset contains no valid movies after cleaning")
+
+    df = df.reset_index(drop=True)
+    df.attrs["dropped"] = dropped
+    return df
 
 
 def load_movies(path: Path) -> pd.DataFrame:

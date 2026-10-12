@@ -25,7 +25,14 @@ import { useApp } from '../context/AppContext.jsx';
 import { COMPONENTS, COMPONENT_INFO } from '../utils/components.js';
 import { genreStyle } from '../utils/genres.js';
 import { moodStyle } from '../utils/moods.js';
-import { countSelections, hasYearPreference } from '../utils/prefs.js';
+import {
+  MAX_LIST_ITEMS,
+  activeComponents,
+  activeWeightTotal,
+  countSelections,
+  hasYearPreference,
+  normalizeKeyword,
+} from '../utils/prefs.js';
 
 function toggleValue(list, value) {
   return list.includes(value) ? list.filter((v) => v !== value) : [...list, value];
@@ -47,7 +54,8 @@ function StepHeader({ title, text, optional }) {
 }
 
 export default function PreferencesPage() {
-  const { options, status, statusError, connect, prefs, setPrefs, resetPrefs, ready, fetchRecommendations } = useApp();
+  const { options, status, statusError, connect, prefs, setPrefs, resetPrefs, ready, hasPrefs, weightsValid, fetchRecommendations } =
+    useApp();
   const [params, setParams] = useSearchParams();
   const [showWeights, setShowWeights] = useState(false);
   const navigate = useNavigate();
@@ -79,20 +87,28 @@ export default function PreferencesPage() {
     { id: 'mood', title: 'Mood', done: prefs.moods.length > 0, summary: prefs.moods.length ? prefs.moods.slice(0, 2).join(', ') : 'Any' },
     { id: 'themes', title: 'Themes', done: prefs.keywords.length + prefs.likedMovies.length > 0, summary: prefs.keywords.length ? plural(prefs.keywords.length, 'theme') : 'Optional' },
     { id: 'era', title: 'Era & rating', done: yearSet || prefs.minRating > 0, summary: yearSet ? `${prefs.yearMin}–${prefs.yearMax}` : 'Any era' },
-    { id: 'review', title: 'Review', done: false, summary: ready ? 'Ready' : 'Needs a preference' },
+    { id: 'review', title: 'Review', done: false, summary: ready ? 'Ready' : hasPrefs ? 'Check weights' : 'Needs a preference' },
   ];
 
-  const stepIndex = Math.min(steps.length - 1, Math.max(0, Number(params.get('step')) || 0));
+  // Whole numbers only: ?step=1.5 or ?step=abc must not index past the step list.
+  const stepIndex = Math.min(steps.length - 1, Math.max(0, Math.trunc(Number(params.get('step'))) || 0));
   const goTo = (index) => {
     setParams(index ? { step: String(index) } : {}, { replace: false });
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
   const isLast = stepIndex === steps.length - 1;
-  const weightTotal = COMPONENTS.reduce((sum, c) => sum + (prefs.weights[c] || 0), 0);
+  // Shares are computed over the components the backend will actually use.
+  const active = activeComponents(prefs, options);
+  const weightTotal = activeWeightTotal(prefs, options);
   const selections = countSelections(prefs, options);
+  const blockedReason = !hasPrefs
+    ? 'Choose at least one genre, language, mood, theme, liked movie or a narrower year range.'
+    : !weightsValid
+      ? 'Every weight for the preferences you set is 0. Raise at least one in “Scoring weights”.'
+      : '';
 
   const generate = () => {
-    if (!ready || weightTotal === 0) return;
+    if (!ready) return;
     fetchRecommendations({ force: true });
     navigate('/recommendations');
   };
@@ -194,7 +210,12 @@ export default function PreferencesPage() {
             <KeywordInput
               keywords={prefs.keywords}
               suggestions={Object.keys(options.popular_keywords)}
-              onAdd={(k) => !prefs.keywords.some((x) => x.toLowerCase() === k.toLowerCase()) && update({ keywords: [...prefs.keywords, k] })}
+              limit={MAX_LIST_ITEMS}
+              onAdd={(raw) => {
+                const k = normalizeKeyword(raw);
+                if (!k || prefs.keywords.length >= MAX_LIST_ITEMS) return;
+                if (!prefs.keywords.some((x) => x.toLowerCase() === k.toLowerCase())) update({ keywords: [...prefs.keywords, k] });
+              }}
               onRemove={(k) => update({ keywords: prefs.keywords.filter((x) => x !== k) })}
             />
             <div className="sub-section">
@@ -202,7 +223,9 @@ export default function PreferencesPage() {
               <p className="muted small">Their themes join your profile, and they won’t be recommended back to you.</p>
               <MovieSearch
                 liked={prefs.likedMovies}
+                limit={MAX_LIST_ITEMS}
                 onAdd={(movie) =>
+                  prefs.likedMovies.length < MAX_LIST_ITEMS &&
                   update({ likedMovies: [...prefs.likedMovies, { movie_id: movie.movie_id, title: movie.title, year: movie.year }] })
                 }
                 onRemove={(id) => update({ likedMovies: prefs.likedMovies.filter((m) => m.movie_id !== id) })}
@@ -340,7 +363,9 @@ export default function PreferencesPage() {
                         style={{ '--fill': `${prefs.weights[c] * 100}%` }}
                         onChange={(e) => update({ weights: { ...prefs.weights, [c]: Number(e.target.value) } })}
                       />
-                      <strong>{weightTotal ? Math.round((prefs.weights[c] / weightTotal) * 100) : 0}%</strong>
+                      <strong title={active[c] ? 'Share of the final score' : 'Not used: no preference set for this component'}>
+                        {active[c] ? `${weightTotal ? Math.round((prefs.weights[c] / weightTotal) * 100) : 0}%` : '—'}
+                      </strong>
                     </label>
                   ))}
                   <button type="button" className="btn btn-ghost btn-sm" onClick={() => update({ weights: { ...options.default_weights } })}>
@@ -350,10 +375,10 @@ export default function PreferencesPage() {
               )}
             </div>
 
-            <button type="button" className="btn btn-primary btn-xl generate-btn" onClick={generate} disabled={!ready || weightTotal === 0}>
+            <button type="button" className="btn btn-primary btn-xl generate-btn" onClick={generate} disabled={!ready}>
               <Sparkles size={20} /> Generate My Recommendations
             </button>
-            {!ready && <p className="muted small center">Choose at least one genre, language, mood, theme, liked movie or a narrower year range.</p>}
+            {blockedReason && <p className="muted small center" role="status">{blockedReason}</p>}
           </>
         )}
       </div>
@@ -369,12 +394,12 @@ export default function PreferencesPage() {
           </button>
         </div>
         {isLast ? (
-          <button type="button" className="btn btn-primary" onClick={generate} disabled={!ready || weightTotal === 0}>
+          <button type="button" className="btn btn-primary" onClick={generate} disabled={!ready}>
             <Sparkles size={17} /> Generate
           </button>
         ) : (
           <div className="action-bar-right">
-            <button type="button" className="btn btn-ghost hide-sm" onClick={generate} disabled={!ready || weightTotal === 0}>
+            <button type="button" className="btn btn-ghost hide-sm" onClick={generate} disabled={!ready}>
               <Sparkles size={16} /> Generate now
             </button>
             <button type="button" className="btn btn-primary" onClick={() => goTo(stepIndex + 1)}>

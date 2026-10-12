@@ -23,7 +23,8 @@ def score_histogram(scores: list[float], bins: int = 10) -> list[dict]:
 
 def build_analytics(engine: RecommendationEngine, store: Store) -> dict:
     usage = store.usage_stats()
-    feedback = store.get_feedback().values()
+    # Only count feedback for movies that are still in the catalogue (matches /api/feedback).
+    feedback = [f for f in store.get_feedback().values() if engine.get_movie(f["movie_id"]) is not None]
     scores = usage["scores"]
     most_recommended = [
         {"movie_id": movie_id, "title": engine.get_movie(movie_id)["title"], "count": count}

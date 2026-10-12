@@ -14,7 +14,8 @@ const TABS = [
 ];
 
 export default function MyListPage() {
-  const { feedback, feedbackVersion, clearAllFeedback, status } = useApp();
+  const { feedback, feedbackVersion, clearAllFeedback, status, statusError, connect } = useApp();
+  const [retry, setRetry] = useState(0);
   const [tab, setTab] = useState('favorites');
   const [movies, setMovies] = useState({ byId: {}, loading: true, error: '' });
 
@@ -22,6 +23,7 @@ export default function MyListPage() {
   useEffect(() => {
     if (status !== 'online') return undefined;
     let cancelled = false;
+    setMovies((m) => ({ ...m, loading: !Object.keys(m.byId).length, error: '' }));
     api
       .feedback()
       .then((data) => !cancelled && setMovies({ byId: Object.fromEntries(data.items.map((i) => [i.movie_id, i.movie])), loading: false, error: '' }))
@@ -29,7 +31,7 @@ export default function MyListPage() {
     return () => {
       cancelled = true;
     };
-  }, [status, feedbackVersion]);
+  }, [status, feedbackVersion, retry]);
 
   const current = TABS.find((t) => t.id === tab);
   // Live feedback state drives membership, so un-favouriting removes a card immediately.
@@ -66,8 +68,11 @@ export default function MyListPage() {
         )}
       </div>
 
-      {movies.error && <ErrorState title="Couldn’t load your list" message={movies.error} />}
-      {movies.loading && !movies.error ? (
+      {status === 'offline' ? (
+        <ErrorState title="Can’t load your list" message={statusError} onRetry={connect} />
+      ) : movies.error ? (
+        <ErrorState title="Couldn’t load your list" message={movies.error} onRetry={() => setRetry((r) => r + 1)} />
+      ) : movies.loading ? (
         <Spinner label="Loading your list…" />
       ) : listed.length === 0 ? (
         <StateMessage

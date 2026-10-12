@@ -48,10 +48,10 @@ export function DataTable({ rows, columns }) {
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => (
-            <tr key={row[0]}>
+          {rows.map((row, r) => (
+            <tr key={`${r}-${row[0]}`}>
               {row.map((cell, i) => (
-                <td key={`${row[0]}-${columns[i]}`}>{cell}</td>
+                <td key={columns[i]}>{cell}</td>
               ))}
             </tr>
           ))}
@@ -75,25 +75,25 @@ export function BarList({ data, unit = '', formatValue = (v) => v }) {
           </span>
         ))}
       </div>
-      {data.map((d) => {
+      {data.map((d, i) => {
         const share = total ? Math.round((d.value / total) * 100) : 0;
         return (
           <div
-            key={d.label}
-            className={`bar-row ${hover === d.label ? 'is-hover' : ''}`}
+            key={`${i}-${d.label}`}
+            className={`bar-row ${hover === i ? 'is-hover' : ''}`}
             role="listitem"
             tabIndex={0}
             aria-label={`${d.label}: ${formatValue(d.value)}${unit}`}
-            onMouseEnter={() => setHover(d.label)}
+            onMouseEnter={() => setHover(i)}
             onMouseLeave={() => setHover(null)}
-            onFocus={() => setHover(d.label)}
+            onFocus={() => setHover(i)}
             onBlur={() => setHover(null)}
           >
             <span className="bar-label">{d.label}</span>
             <span className="bar-track">
               <span className="bar-mark" style={{ width: `${(d.value / max) * 100}%` }} />
               <span className="bar-value">{formatValue(d.value)}</span>
-              {hover === d.label && (
+              {hover === i && (
                 <span className="chart-tooltip" role="tooltip" style={{ left: `${Math.min(80, (d.value / max) * 100)}%` }}>
                   <strong>{d.label}</strong>
                   <span>

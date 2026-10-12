@@ -1,28 +1,40 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import { Heart, LoaderCircle, Search, Star, X } from 'lucide-react';
 import { api } from '../../api/client.js';
 import { useDebounce } from '../../hooks/useDebounce.js';
 
 // Optional: movies the user already loves. Their keywords/descriptions join the
 // TF-IDF theme profile on the backend, and they are excluded from results.
-export default function MovieSearch({ liked, onAdd, onRemove }) {
+export default function MovieSearch({ liked, onAdd, onRemove, limit = Infinity }) {
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
   const [open, setOpen] = useState(false);
   const debounced = useDebounce(query.trim());
+  const rootRef = useRef(null);
+  const inputRef = useRef(null);
+  const listId = useId();
+  const full = liked.length >= limit;
 
   useEffect(() => {
     if (!debounced) {
       setResults([]);
+      setLoading(false); // also clears a spinner left by a request that was cancelled
+      setError('');
       return undefined;
     }
     let cancelled = false;
     setLoading(true);
+    setError('');
     api
       .searchMovies(debounced)
       .then((movies) => !cancelled && setResults(movies))
-      .catch(() => !cancelled && setResults([]))
+      .catch((e) => {
+        if (cancelled) return;
+        setResults([]);
+        setError(e.message);
+      })
       .finally(() => !cancelled && setLoading(false));
     return () => {
       cancelled = true;
@@ -30,31 +42,60 @@ export default function MovieSearch({ liked, onAdd, onRemove }) {
   }, [debounced]);
 
   const likedIds = new Set(liked.map((m) => m.movie_id));
+  const optionButtons = () => [...(rootRef.current?.querySelectorAll('.search-results button:not(:disabled)') ?? [])];
+
+  // Close only when focus leaves the whole widget, so Tab / arrow keys can reach the results.
+  const onBlur = (e) => {
+    if (!rootRef.current?.contains(e.relatedTarget)) setOpen(false);
+  };
+
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape') {
+      setOpen(false);
+      inputRef.current?.focus();
+      return;
+    }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    const buttons = optionButtons();
+    if (!buttons.length) return;
+    e.preventDefault();
+    setOpen(true);
+    const index = buttons.indexOf(document.activeElement);
+    const next = e.key === 'ArrowDown' ? Math.min(buttons.length - 1, index + 1) : index - 1;
+    if (next < 0) inputRef.current?.focus();
+    else buttons[next].focus();
+  };
 
   return (
-    <div className="movie-search">
+    <div className="movie-search" ref={rootRef} onBlur={onBlur} onKeyDown={onKeyDown}>
       <div className="input-shell">
         <Search size={17} />
         <input
+          ref={inputRef}
           type="text"
           value={query}
-          placeholder="Search the catalogue, e.g. Interstellar"
+          disabled={full}
+          placeholder={full ? `Maximum of ${limit} movies reached` : 'Search the catalogue, e.g. Interstellar'}
           onChange={(e) => {
             setQuery(e.target.value);
             setOpen(true);
           }}
           onFocus={() => setOpen(true)}
-          onBlur={() => setTimeout(() => setOpen(false), 150)}
           aria-label="Search movies you love"
+          role="combobox"
+          aria-expanded={open && Boolean(debounced)}
+          aria-controls={listId}
+          aria-autocomplete="list"
         />
         {loading && <LoaderCircle size={17} className="spin" />}
       </div>
 
       {open && debounced && (
-        <ul className="search-results glass" role="listbox">
-          {results.length === 0 && !loading && <li className="search-empty">No movies found</li>}
+        <ul className="search-results glass" role="listbox" id={listId}>
+          {error && <li className="search-empty error-text">{error}</li>}
+          {!error && results.length === 0 && !loading && <li className="search-empty">No movies found</li>}
           {results.map((movie) => (
-            <li key={movie.movie_id}>
+            <li key={movie.movie_id} role="option" aria-selected={false}>
               <button
                 type="button"
                 disabled={likedIds.has(movie.movie_id)}
@@ -63,6 +104,7 @@ export default function MovieSearch({ liked, onAdd, onRemove }) {
                   onAdd(movie);
                   setQuery('');
                   setOpen(false);
+                  inputRef.current?.focus();
                 }}
               >
                 <span>

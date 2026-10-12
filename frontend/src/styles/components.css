@@ -1264,7 +1264,7 @@
 
 .stepper ol {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
   margin: 0;
   padding: 0;
@@ -1350,5 +1350,10 @@
 
   .stepper button {
     justify-content: center;
+    padding: 8px 2px;
+  }
+
+  .stepper ol {
+    gap: 4px;
   }
 }

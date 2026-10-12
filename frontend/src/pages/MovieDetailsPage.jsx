@@ -21,13 +21,14 @@ import { ErrorState, Spinner, StateMessage } from '../components/ui/Feedback.jsx
 import Poster from '../components/ui/Poster.jsx';
 import ScoreRing from '../components/ui/ScoreRing.jsx';
 import { useApp } from '../context/AppContext.jsx';
+import { formatRuntime } from '../utils/format.js';
 
 function similarCaption(item) {
   const shared = [...item.shared_genres, ...item.shared_moods].slice(0, 3).join(', ');
   return `similarity ${item.similarity.toFixed(2)}${shared ? ` · ${shared}` : ''}`;
 }
 
-function MatchPanel({ explanation, loading, error, ready }) {
+function MatchPanel({ explanation, loading, error, ready, onRetry }) {
   if (!ready) {
     return (
       <div className="match-panel glass match-empty">
@@ -51,6 +52,9 @@ function MatchPanel({ explanation, loading, error, ready }) {
     return (
       <div className="match-panel glass">
         <p className="error-text">{error}</p>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={onRetry}>
+          Try again
+        </button>
       </div>
     );
   }
@@ -84,8 +88,8 @@ function MatchPanel({ explanation, loading, error, ready }) {
 
       {highlights.length > 0 && (
         <div className="tag-row">
-          {highlights.map((h) => (
-            <span key={h} className="tag is-match">
+          {highlights.map((h, i) => (
+            <span key={`${i}-${h}`} className="tag is-match">
               <CircleCheck size={12} /> {h}
             </span>
           ))}
@@ -93,8 +97,8 @@ function MatchPanel({ explanation, loading, error, ready }) {
       )}
 
       <ul className="reason-list">
-        {explanation.reasons.map((reason) => (
-          <li key={reason}>
+        {explanation.reasons.map((reason, i) => (
+          <li key={`${i}-${reason}`}>
             <Lightbulb size={15} /> {reason}
           </li>
         ))}
@@ -115,7 +119,8 @@ export default function MovieDetailsPage() {
   const { movieId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
-  const { status, payload, ready, feedbackVersion } = useApp();
+  const { status, statusError, connect, payload, ready, feedbackVersion } = useApp();
+  const [explainRetry, setExplainRetry] = useState(0);
   const id = Number(movieId);
   const validId = Number.isInteger(id) && id > 0;
 
@@ -163,11 +168,18 @@ export default function MovieDetailsPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, movieLoaded, ready, payloadKey, feedbackVersion]);
+  }, [id, movieLoaded, ready, payloadKey, feedbackVersion, explainRetry]);
 
   const goBack = () => (location.key !== 'default' ? navigate(-1) : navigate('/recommendations'));
   const { movie, similar, loading, error, notFound } = movieState;
 
+  if (status === 'offline' && !movie) {
+    return (
+      <div className="page container narrow">
+        <ErrorState title="Can’t load this movie" message={statusError} onRetry={connect} />
+      </div>
+    );
+  }
   if (notFound) {
     return (
       <div className="page container narrow">
@@ -221,7 +233,7 @@ export default function MovieDetailsPage() {
                   <Star size={15} fill="currentColor" className="star" /> {movie.rating.toFixed(1)}/10
                 </span>
                 <span>
-                  <Clock size={15} /> {movie.runtime} min
+                  <Clock size={15} /> {formatRuntime(movie.runtime)}
                 </span>
                 <span>
                   <Globe size={15} /> {movie.language}
@@ -270,7 +282,13 @@ export default function MovieDetailsPage() {
       </section>
 
       <div className="container details-body">
-        <MatchPanel explanation={explain.data} loading={explain.loading} error={explain.error} ready={ready} />
+        <MatchPanel
+          explanation={explain.data}
+          loading={explain.loading}
+          error={explain.error}
+          ready={ready}
+          onRetry={() => setExplainRetry((r) => r + 1)}
+        />
 
         <section className="section" aria-labelledby="similar-heading">
           <div className="section-head">

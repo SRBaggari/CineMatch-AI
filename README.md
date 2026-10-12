@@ -19,7 +19,7 @@ All processing runs locally. The project uses no paid APIs, API keys, external A
 | API | FastAPI with Pydantic validation: preference options, movie list and details, recommendations, per-movie explanation, similar movies, search, feedback, analytics |
 | Feedback & personalisation | Like / dislike / favourite stored in local SQLite; a separate, bounded feedback adjustment re-ranks matching movies ([section 10](#10-feedback-search-analytics-and-performance)) |
 | Frontend | Multi-page React app: Home, Preferences (6-step wizard), Recommendations, Movie Details, Browse (search & filters), My List, Analytics, How It Works ([section 9](#9-frontend)) |
-| Testing | 118 pytest tests covering scoring maths, explanations, feedback, search, caching, the SQLite store, analytics, and the API |
+| Testing | 138 backend tests (pytest) and 22 frontend unit tests (Vitest), covering scoring maths, explanations, feedback, search, caching, data cleaning, the SQLite store, analytics, the API, preference sanitising, and API error handling |
 
 ---
 
@@ -31,7 +31,7 @@ All processing runs locally. The project uses no paid APIs, API keys, external A
 | Backend | Python 3.10+, FastAPI, Uvicorn, Pydantic v2 |
 | ML / data | Pandas, NumPy, SciPy, scikit-learn (`TfidfVectorizer`, `MultiLabelBinarizer`, `cosine_similarity`) |
 | Dataset | Local CSV (`backend/data/movies.csv`) |
-| Testing | Pytest with FastAPI `TestClient` |
+| Testing | Pytest with FastAPI `TestClient`; Vitest for frontend logic |
 
 ## 2. System architecture
 
@@ -122,6 +122,13 @@ CineMatch-AI/
 | *(extra)* | `director`, `cast` | string, pipe list | used only in "More like this" explanations |
 
 The loader checks that the required columns exist, coerces types, removes duplicate labels inside list fields, and drops duplicate movies (same `movie_id`, or same title and year).
+
+**Missing values are never invented.**
+
+* **Dropped rows:** a row is dropped (and logged by reason) when it is missing a valid `movie_id`, `title`, `year` (1880–2100), or `rating` (0–10). These fields identify, filter, or rank a movie.
+* **Filled fields:** missing optional fields get explicit empty values. Genres, moods, keywords, and cast become empty lists. Director and language become `Unknown`, and the overview becomes empty.
+* **Unknown runtime:** a missing or non-positive runtime becomes `0`, which the UI shows as "Runtime —".
+* **No usable rows:** a dataset with no valid rows fails at startup with a clear error.
 
 ## 5. Recommendation algorithm (summary)
 
@@ -241,8 +248,11 @@ npm run dev
 
 ```powershell
 cd C:\Users\rinki\CineMatch-AI\backend
-.\.venv\Scripts\python.exe -m pytest -v
-.\.venv\Scripts\python.exe -m app.demo
+.\.venv\Scripts\python.exe -m pytest -v      # 138 backend tests
+.\.venv\Scripts\python.exe -m app.demo       # sample input + scored, ranked output
+
+cd C:\Users\rinki\CineMatch-AI\frontend
+npm test                                     # 22 Vitest unit tests
 ```
 
 ### If port 8000 is busy

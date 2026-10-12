@@ -415,6 +415,11 @@
   color: #fecdd3;
 }
 
+.toast.tone-info {
+  border-color: rgba(168, 85, 247, 0.5);
+  color: #e9d5ff;
+}
+
 .toast span {
   flex: 1;
   font-size: 0.9rem;

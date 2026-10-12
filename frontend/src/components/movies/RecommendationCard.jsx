@@ -5,6 +5,7 @@ import Poster from '../ui/Poster.jsx';
 import ScoreRing from '../ui/ScoreRing.jsx';
 import FeedbackButtons from './FeedbackButtons.jsx';
 import ScoreSummary from './ScoreSummary.jsx';
+import { formatRuntime } from '../../utils/format.js';
 
 // Compact breakdown shown on every card (full maths lives on the details page).
 const CARD_COMPONENTS = [
@@ -36,7 +37,7 @@ export default function RecommendationCard({ rec, style }) {
                 <Star size={13} fill="currentColor" className="star" /> {movie.rating.toFixed(1)}
               </span>
               <span>
-                <Clock size={13} /> {movie.runtime} min
+                <Clock size={13} /> {formatRuntime(movie.runtime)}
               </span>
               <span className={matched.language ? 'is-match' : ''}>
                 <Globe size={13} /> {movie.language}

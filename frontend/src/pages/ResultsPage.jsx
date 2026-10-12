@@ -27,8 +27,8 @@ function PreferenceSummary({ prefs, options }) {
   if (prefs.minRating > 0) chips.push(`★ ${prefs.minRating.toFixed(1)}+`);
   return (
     <div className="summary-chips">
-      {chips.map((chip) => (
-        <span key={chip} className="tag">
+      {chips.map((chip, i) => (
+        <span key={`${i}-${chip}`} className="tag">
           {chip}
         </span>
       ))}
@@ -36,8 +36,16 @@ function PreferenceSummary({ prefs, options }) {
   );
 }
 
+// Send the user to the step whose filter removed every movie.
+function adjustStep(report) {
+  if (report.after_min_rating === 0 || report.after_year_range === 0) return 4;
+  if ('after_languages' in report) return 1; // a strict language filter emptied or narrowed the list
+  if ('after_year_range' in report) return 4;
+  return 0;
+}
+
 export default function ResultsPage() {
-  const { options, status, statusError, connect, prefs, setPrefs, ready, results, resultsCurrent, fetchRecommendations, feedback, feedbackStale } = useApp();
+  const { options, status, statusError, connect, prefs, setPrefs, ready, hasPrefs, results, resultsCurrent, fetchRecommendations, feedback, feedbackStale } = useApp();
   const feedbackCount = Object.keys(feedback).length;
   const [sort, setSort] = useState('score');
 
@@ -61,6 +69,24 @@ export default function ResultsPage() {
         ) : (
           <Spinner label="Connecting to the recommendation engine…" />
         )}
+      </div>
+    );
+  }
+
+  if (hasPrefs && !ready) {
+    return (
+      <div className="page container narrow">
+        <StateMessage
+          icon={SlidersHorizontal}
+          title="All of your scoring weights are zero"
+          action={
+            <Link to="/preferences?step=5" className="btn btn-primary btn-lg">
+              <SlidersHorizontal size={18} /> Adjust weights
+            </Link>
+          }
+        >
+          <p>Every weight for the preferences you set is 0, so no score can be calculated. Raise at least one weight.</p>
+        </StateMessage>
       </div>
     );
   }
@@ -140,8 +166,8 @@ export default function ResultsPage() {
                   <Info size={13} /> Genres or moods were inferred from the movies you love.
                 </p>
               )}
-              {data.warnings.map((w) => (
-                <p key={w} className="warning small">
+              {data.warnings.map((w, i) => (
+                <p key={`${i}-${w}`} className="warning small">
                   <Info size={13} /> {w}
                 </p>
               ))}
@@ -175,7 +201,7 @@ export default function ResultsPage() {
               icon={SearchX}
               title="No movies match these preferences"
               action={
-                <Link to="/preferences?step=4" className="btn btn-primary">
+                <Link to={`/preferences?step=${adjustStep(data.filter_report)}`} className="btn btn-primary">
                   <SlidersHorizontal size={16} /> Adjust preferences
                 </Link>
               }

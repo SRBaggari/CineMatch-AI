@@ -9,7 +9,7 @@ import { useApp } from '../context/AppContext.jsx';
 const toBars = (obj) => Object.entries(obj).map(([label, value]) => ({ label, value }));
 
 export default function AnalyticsPage() {
-  const { status, feedbackVersion } = useApp();
+  const { status, statusError, connect, feedbackVersion } = useApp();
   const [state, setState] = useState({ data: null, loading: true, error: '' });
 
   const load = useCallback(() => {
@@ -25,6 +25,13 @@ export default function AnalyticsPage() {
   }, [status, load, feedbackVersion]);
 
   const { data, loading, error } = state;
+  if (status === 'offline' && !data) {
+    return (
+      <div className="page container narrow">
+        <ErrorState title="Can’t reach the analytics service" message={statusError} onRetry={connect} />
+      </div>
+    );
+  }
   if (error && !data) {
     return (
       <div className="page container narrow">

@@ -19,6 +19,7 @@ import MovieTile from '../components/movies/MovieTile.jsx';
 import { ErrorState, Spinner } from '../components/ui/Feedback.jsx';
 import Poster from '../components/ui/Poster.jsx';
 import { useApp } from '../context/AppContext.jsx';
+import { formatRuntime } from '../utils/format.js';
 
 const STEPS = [
   { icon: SlidersHorizontal, title: 'Tell us your taste', text: 'Pick genres, languages, a mood, themes, an era and a minimum rating.' },
@@ -152,7 +153,7 @@ export default function HomePage() {
                 <div className="meta-row">
                   <span>{featured.year}</span>
                   <span>
-                    <Clock size={14} /> {featured.runtime} min
+                    <Clock size={14} /> {formatRuntime(featured.runtime)}
                   </span>
                   <span>
                     <Globe size={14} /> {featured.language}
