@@ -1,181 +1,453 @@
-# CineMatch AI — Personalized Movie Recommendation System
+# 🎬 CineMatch AI — Personalized Movie Recommendation System
 
 **DecodeLabs Artificial Intelligence Industrial Training · Project 3: AI Recommendation Logic**
 
-CineMatch AI is a content-based movie recommendation system. It collects a user's preferences, represents movies as feature vectors, and scores each movie with TF-IDF and cosine similarity. A configurable weighted sum combines the scores into a ranked top 10. Every recommendation lists its matched preferences, the reasons for the pick, and each score component.
+CineMatch AI is a full-stack movie recommender that explains itself. You describe your taste: genres, languages, mood, themes, era, and a minimum rating. The engine then scores every movie in its catalogue with **content-based filtering**, **TF-IDF**, **cosine similarity**, and **weighted preference matching**. You get a ranked list, and each pick says *why* it was chosen, down to the individual score components.
 
-All processing runs locally. The project uses no paid APIs, API keys, external AI services, or random selection. Every score can be traced back to the dataset and the algorithm.
+Everything runs locally. There are no paid APIs, no API keys, no external AI services, and no random selection.
 
-| Requirement | How it is met |
-|---|---|
-| Movie dataset | 130 movies with id, title, genres, description, year, language, runtime, rating, keywords, and moods ([dataset note](#4-dataset)) |
-| Preference collection | Genres, languages, moods, keywords or themes, year range, and minimum rating (plus optional liked movies) |
-| Content-based filtering | Multi-hot genre and mood vectors, one-hot language vector, TF-IDF text vector, and release year per movie |
-| TF-IDF vectorisation | `TfidfVectorizer` over each movie's keywords and description |
-| Cosine similarity | Between the user's preferences and each movie, in every feature space |
-| Weighted preference matching | Configurable weights for genre, language, mood, keyword, and year, normalised over the components in use |
-| Ranking | Top 10 by default, hard filters, duplicate removal, an explained empty result, deterministic tie-breaking |
-| Explainable AI | Title, relevance score, matched genres and preferences, reasons ordered by contribution, and per-component scores |
-| API | FastAPI with Pydantic validation: preference options, movie list and details, recommendations, per-movie explanation, similar movies, search, feedback, analytics |
-| Feedback & personalisation | Like / dislike / favourite stored in local SQLite; a separate, bounded feedback adjustment re-ranks matching movies ([section 10](#10-feedback-search-analytics-and-performance)) |
-| Frontend | Multi-page React app: Home, Preferences (6-step wizard), Recommendations, Movie Details, Browse (search & filters), My List, Analytics, How It Works ([section 9](#9-frontend)) |
-| Testing | 138 backend tests (pytest) and 22 frontend unit tests (Vitest), covering scoring maths, explanations, feedback, search, caching, data cleaning, the SQLite store, analytics, the API, preference sanitising, and API error handling |
+![Recommendations page](docs/screenshots/03-recommendations.jpg)
 
 ---
 
-## 1. Tech stack
+## Table of Contents
+
+1. [Project Title](#-cinematch-ai--personalized-movie-recommendation-system)
+2. [Project Overview](#2-project-overview)
+3. [Problem Statement](#3-problem-statement)
+4. [Project Objectives](#4-project-objectives)
+5. [Features](#5-features)
+6. [Technology Stack](#6-technology-stack)
+7. [System Architecture](#7-system-architecture)
+8. [Recommendation Algorithm](#8-recommendation-algorithm)
+9. [Dataset Description](#9-dataset-description)
+10. [Folder Structure](#10-folder-structure)
+11. [Installation Instructions](#11-installation-instructions)
+12. [Backend Setup](#12-backend-setup)
+13. [Frontend Setup](#13-frontend-setup)
+14. [How to Run the Project](#14-how-to-run-the-project)
+15. [API Documentation](#15-api-documentation)
+16. [Example User Input](#16-example-user-input)
+17. [Example Recommendations](#17-example-recommendations)
+18. [Testing Instructions](#18-testing-instructions)
+19. [Screenshots](#19-screenshots)
+20. [Challenges and Solutions](#20-challenges-and-solutions)
+21. [Limitations](#21-limitations)
+22. [Future Enhancements](#22-future-enhancements)
+23. [Conclusion](#23-conclusion)
+
+---
+
+## 2. Project Overview
+
+CineMatch AI has two parts:
+
+* **A Python / FastAPI backend.** It loads a local movie dataset and turns every movie into numerical feature vectors. It scores those vectors against a user's preferences and returns ranked, explained recommendations through a REST API.
+* **A React / Vite frontend.** It collects preferences through a step-by-step form and displays the recommendations with their explanations. It also offers search and filtering, movie details with similar movies, like/dislike/favourite feedback, and an analytics dashboard.
+
+Explainability is the guiding principle. Every number shown in the interface can be traced back to the data and to a formula in this document.
+
+## 3. Problem Statement
+
+Streaming catalogues are large, and choosing what to watch is slow. Many recommenders are black boxes: they say *what* to watch but not *why*. Others rely on the viewing history of many users, which a new user (or a small project) does not have. This is the "cold-start" problem.
+
+This project addresses three questions:
+
+1. How can we recommend movies **from a user's stated preferences alone**, with no history from other users?
+2. How can we **measure similarity** between a person's taste and a movie in a principled, mathematical way?
+3. How can we make every recommendation **transparent**, so the user understands and trusts the result?
+
+## 4. Project Objectives
+
+* Collect user preferences: genres, languages, mood, themes or keywords, release-year range, and minimum rating.
+* Represent each movie as **feature vectors** (content-based filtering).
+* Convert descriptions and keywords into numbers with **TF-IDF**.
+* Measure the match between the user and each movie with **cosine similarity**.
+* Combine several signals with **configurable, normalised weights** into one relevance score.
+* **Rank** movies deterministically, apply hard filters correctly, and handle "no match" cases gracefully.
+* **Explain** every recommendation: matched attributes, reasons, and every score component.
+* Provide a clean, responsive web interface and a documented API, backed by automated tests.
+
+## 5. Features
+
+### Recommendation engine
+* Content-based filtering over five components: **genre, keyword/theme, mood, language, and release year**.
+* TF-IDF vectorisation of movie keywords and descriptions (scikit-learn).
+* Cosine similarity between the user's preferences and each movie.
+* **Weighted preference matching** with weights that are configurable per request and re-normalised over the preferences you actually set.
+* **Hard filters:** minimum rating (always), plus optional "only these languages" and "only this year range".
+* **Deterministic ranking:** score, then rating, then movie id, so ties always resolve the same way.
+* **Item-to-item similarity** ("More like this") using a precomputed movie-to-movie cosine matrix.
+
+### Explainable AI
+* A **one-sentence summary** built only from attributes that actually matched. For example: *"Recommended because you enjoy Science Fiction and Thriller movies, prefer English-language content, …"*.
+* **Score breakdown** for each component (value × weight = contribution), plus the overall relevance score.
+* Matched genres, moods, language, keywords, and year are highlighted.
+* The strongest shared TF-IDF terms between your themes and the movie.
+* An empty result is explained: the response says which filter removed the movies and how many survived each step.
+
+### User feedback & personalisation
+* **Like**, **dislike**, and **save to favourites**, stored locally in **SQLite**.
+* A **feedback adjustment** that is kept separate from the preference score. Likes and favourites boost similar movies, and dislikes hide a movie and demote similar ones. A toggle restores the preference-only ranking.
+
+### Search, filtering, and discovery
+* Title search, filters for genre, language, and release year, and sorting by relevance, rating, year, or title.
+* An optional "rank by my preferences" mode that shows each movie's match score.
+* Movie details page with keywords, credits, a full match explanation, and similar movies.
+
+### Analytics dashboard
+* Catalogue statistics computed from the dataset: genre, language, decade, and rating distributions.
+* Usage statistics from the local SQLite log: most frequently selected genres, the distribution of recommendation scores served, and the most-recommended movies.
+* The dashboard shows only real data. With no usage yet, the usage charts are empty and say so.
+
+### Engineering quality
+* Pydantic request validation. Invalid input gets a clear **422**, never a crash.
+* Fitted features are cached on disk (keyed by a hash of the dataset) and component scores are cached in memory, so TF-IDF is not re-fitted on every start.
+* Responsive design for desktop, tablet, and phone (down to 360 px wide).
+* Offline and error states with retry, and saved preferences that survive a page reload.
+* Automated backend (pytest) and frontend (Vitest) test suites.
+
+## 6. Technology Stack
 
 | Layer | Technology |
 |---|---|
 | Frontend | React 19, React Router 7, Vite 8, JavaScript, plain CSS (no Tailwind), Lucide React icons |
 | Backend | Python 3.10+, FastAPI, Uvicorn, Pydantic v2 |
-| ML / data | Pandas, NumPy, SciPy, scikit-learn (`TfidfVectorizer`, `MultiLabelBinarizer`, `cosine_similarity`) |
-| Dataset | Local CSV (`backend/data/movies.csv`) |
-| Testing | Pytest with FastAPI `TestClient`; Vitest for frontend logic |
+| Machine learning / data | scikit-learn (`TfidfVectorizer`, `MultiLabelBinarizer`, `cosine_similarity`), NumPy, SciPy, Pandas |
+| Storage | Local CSV dataset; SQLite (Python standard library) for feedback and usage logs |
+| Testing | pytest + FastAPI `TestClient` (backend), Vitest (frontend) |
+| Platform | Developed and run on Windows with PowerShell |
 
-## 2. System architecture
+## 7. System Architecture
 
 ```
-┌──────────────────────────── Browser (React + Vite) ────────────────────────────┐
-│  Routes: / · /preferences · /recommendations · /movies/:id · /how-it-works     │
-│  AppContext (options, saved preferences, cached results) ─► api/client.js      │
-└───────────────────────────────────────┬────────────────────────────────────────┘
-                                        │  Vite dev proxy  /api → 127.0.0.1:8000
-┌───────────────────────────────────────▼────────────────────────────────────────┐
-│ FastAPI (app/main.py)                                                          │
-│   routes.py ─ validates with schemas.py (Pydantic) ─► RecommendationEngine     │
-│                                                                                │
-│ RecommendationEngine (app/recommender.py), built once at startup               │
-│   1. feature vectors (multi-hot, one-hot, TF-IDF, year)                        │
-│   2. user profile in the same spaces                                           │
-│   3. five component scores in [0, 1] (cosine similarities, match, year fit)    │
-│   4. normalised weighted sum                                                   │
-│   5. hard filters, de-duplication, deterministic ranking                       │
-│   6. explanation (matched preferences, reasons, components)                    │
-│                                                                                │
-│ data_loader.py ─ reads, validates, cleans, de-duplicates ─► data/movies.csv    │
-└────────────────────────────────────────────────────────────────────────────────┘
+┌───────────────────────────── Browser: React + Vite ─────────────────────────────┐
+│  Pages: Home · Preferences · Recommendations · Movie Details · Browse ·         │
+│         My List · Analytics · How It Works                                      │
+│  AppContext (options, saved preferences, cached results, feedback)              │
+│  api/client.js ──► fetch('/api/...')                                            │
+└──────────────────────────────────────┬──────────────────────────────────────────┘
+                                       │  Vite dev proxy: /api → http://127.0.0.1:8000
+┌──────────────────────────────────────▼──────────────────────────────────────────┐
+│  FastAPI (app/main.py) ── routes.py ── schemas.py (Pydantic validation)         │
+│                                                                                 │
+│  RecommendationEngine (app/recommender.py), built once at startup               │
+│    1. Feature vectors: multi-hot genres & moods, one-hot language,              │
+│       TF-IDF of keywords + description, release year                            │
+│    2. User profile mapped into the same vector spaces                           │
+│    3. Component scores in [0, 1] (cosine similarities, language match, year)    │
+│    4. Normalised weighted sum  →  base (preference) score                       │
+│    5. Optional feedback adjustment  →  final score                              │
+│    6. Hard filters, de-duplication, deterministic ranking                       │
+│    7. Explanation: summary, reasons, matched attributes, score breakdown        │
+│                                                                                 │
+│  data_loader.py ── validates & cleans ──► data/movies.csv                       │
+│  store.py ── SQLite ──► feedback + usage log      analytics.py ──► dashboards   │
+│  Disk cache (data/.cache) for fitted TF-IDF + similarity matrices               │
+└─────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## 3. Folder structure
+**Request flow:** the user submits preferences in the browser, which sends `POST /api/recommendations`. FastAPI validates the body, the engine scores and ranks the movies, and the explained results come back as JSON. The cards then render the summary, the breakdown, and the feedback buttons.
+
+## 8. Recommendation Algorithm
+
+> A more detailed derivation, with a worked example, is in [`docs/ALGORITHM.md`](docs/ALGORITHM.md).
+
+### 8.1 Content-Based Filtering
+
+**Content-based filtering** recommends items that resemble what a user likes, judged by the *content* of the items. Here that means a movie's genres, moods, language, themes, and release year. It needs no history from other users, so it works for a brand-new user on the first request.
+
+For a computer to compare content, every movie becomes a set of **feature vectors**:
+
+| Feature | Encoding | Example (*Inception*) |
+|---|---|---|
+| Genres | multi-hot vector over the 19 genres | Science Fiction = 1, Action = 1, Thriller = 1, all others = 0 |
+| Moods | multi-hot vector over the 15 moods | Mind-Bending = 1, Action-Packed = 1, Thought-Provoking = 1 |
+| Language | one-hot vector over the 10 languages | English = 1 |
+| Keywords + description | TF-IDF vector over the text vocabulary | weights for "dreams", "heist", "subconscious", … |
+| Release year | integer | 2010 |
+
+The user's preferences are mapped into the same spaces, so the two can be compared component by component.
+
+### 8.2 TF-IDF Vectorization
+
+**TF-IDF (Term Frequency – Inverse Document Frequency)** turns text into numbers. A word gets a high weight when it is **frequent in this movie's text** but **rare across the catalogue**, which is exactly what makes a word *distinctive*.
+
+For a term $t$ in a movie document $d$, among $N$ movies:
+
+$$\mathrm{tf}(t,d) = 1 + \ln\big(\text{count}(t,d)\big) \qquad \text{(sublinear term frequency)}$$
+
+$$\mathrm{idf}(t) = \ln\!\left(\frac{1 + N}{1 + \mathrm{df}(t)}\right) + 1 \qquad \text{(smoothed inverse document frequency)}$$
+
+$$\text{tfidf}(t,d) = \mathrm{tf}(t,d)\cdot \mathrm{idf}(t), \qquad \text{then each movie vector is L2-normalised}$$
+
+where $\mathrm{df}(t)$ is the number of movies whose text contains $t$. These are scikit-learn's `TfidfVectorizer(sublinear_tf=True)` defaults, with English stop words removed.
+
+Each movie's document is its **keywords** plus its **description**. Multi-word keywords are also added as a single joined token, repeated twice (`time travel` → `timetravel timetravel time travel`). A theme like *time travel* therefore stays one strong feature instead of matching every description that merely mentions *time*.
+
+### 8.3 Cosine Similarity
+
+**Cosine similarity** measures how closely two vectors point in the same direction:
+
+$$\cos(\mathbf{u},\mathbf{m}) = \frac{\mathbf{u}\cdot\mathbf{m}}{\lVert\mathbf{u}\rVert\,\lVert\mathbf{m}\rVert} = \frac{\sum_i u_i m_i}{\sqrt{\sum_i u_i^2}\,\sqrt{\sum_i m_i^2}}$$
+
+With non-negative vectors, the result lies in $[0, 1]$: **1** means the same direction (a perfect match), and **0** means nothing in common. Because it depends on direction rather than length, a movie is not favoured just for having many tags.
+
+For multi-hot genre or mood vectors, cosine has a simple form. $U$ is the set of user genres and $M$ is the set of movie genres:
+
+$$\cos(U, M) = \frac{|U \cap M|}{\sqrt{|U|\cdot|M|}}$$
+
+*Example:* the user picks {Science Fiction, Thriller} and *Ex Machina* is {Science Fiction, Drama, Thriller}, so $\cos = 2/\sqrt{2 \cdot 3} \approx 0.817$.
+
+### 8.4 Weighted Preference Matching
+
+Each movie $m$ gets five **component scores**, all in $[0,1]$:
+
+| Component | Formula | Default weight $w_c$ |
+|---|---|---|
+| Genre $s_{\text{genre}}$ | $\cos(U_{\text{genres}}, M_{\text{genres}})$ | 0.30 |
+| Keyword $s_{\text{keyword}}$ | $\dfrac{\cos(\text{tfidf}_{\text{user}}, \text{tfidf}_m)}{\max_{m'} \cos(\text{tfidf}_{\text{user}}, \text{tfidf}_{m'})}$ | 0.25 |
+| Mood $s_{\text{mood}}$ | $\cos(U_{\text{moods}}, M_{\text{moods}})$ | 0.20 |
+| Language $s_{\text{language}}$ | $1$ if the movie's language was selected, else $0$ | 0.15 |
+| Year $s_{\text{year}}$ | $\max\!\big(0,\; 1 - d/20\big)$, where $d$ = years outside the chosen range | 0.10 |
+
+The keyword score is **max-normalised**: the best text match in the catalogue scores 1. Raw TF-IDF cosines are small, rarely above 0.5, so without this the keyword weight would have little effect next to genre and mood scores that can reach 1.
+
+Only components the user actually set are **active**. Their weights are re-normalised to sum to 1:
+
+$$w'_c = \frac{w_c}{\sum_{k \in \text{active}} w_k} \qquad\qquad \text{base}(m) = \sum_{c \in \text{active}} w'_c \cdot s_c(m)$$
+
+A user who picks only genres is therefore scored purely on genre, and the score is not capped at 0.30. Weights can be changed per request; a request whose active weights are all zero is rejected.
+
+**Optional feedback adjustment.** This is kept separate from the preference score. $\text{sim}$ is the item-to-item cosine similarity, and a movie never counts its own feedback:
+
+$$\text{adj}(m) = 0.15\cdot\Big(\max_{j \in \text{liked} \cup \text{favourites}} \text{sim}(m,j) \;-\; \max_{j \in \text{disliked}} \text{sim}(m,j)\Big)$$
+
+$$\text{score}(m) = \text{clip}\big(\text{base}(m) + \text{adj}(m),\; 0,\; 1\big)$$
+
+> **Note:** the score is a **weighted similarity used for ranking**. It is **not** a probability that you will enjoy the movie, and the interface labels it as a 0–1 relevance score.
+
+### 8.5 Recommendation Ranking
+
+1. **Hard filters:** remove movies below the minimum rating. If the "only these languages" or "only this year range" switches are on, also remove movies outside them. A preference used as a hard filter is not scored as well, because it would add the same 1.0 to every remaining movie. The exception is when it is your only preference.
+2. **Exclusions:** remove the "movies you love" that seeded the profile, any explicitly excluded movies, and movies you disliked.
+3. **Drop non-matches:** remove movies whose preference score is 0. Feedback can only re-rank movies that match a preference; it cannot pull in unrelated ones.
+4. **Sort deterministically:** by **score ↓**, then **rating ↓**, then **movie id ↑**. Scores are rounded before sorting, so floating-point noise can never reorder genuinely equal scores.
+5. **Return the top N** (10 by default). If nothing survives, the response is still `200`, with an empty list, a `message` naming the filter responsible, and a `filter_report` with the count after each step.
+
+## 9. Dataset Description
+
+`backend/data/movies.csv` contains **130 movies** spanning **19 genres**, **15 moods**, and **10 languages**, released between **1966 and 2023**.
+
+| Column | Type | Description |
+|---|---|---|
+| `movie_id` | integer | Unique identifier |
+| `title` | text | Movie title |
+| `year` | integer | Release year |
+| `genres` | pipe-separated list | e.g. `Science Fiction\|Action\|Thriller` |
+| `director` | text | Director |
+| `cast` | pipe-separated list | Main cast |
+| `keywords` | pipe-separated list | Themes and plot elements, e.g. `dreams\|heist\|reality` |
+| `moods` | pipe-separated list | e.g. `Mind-Bending\|Action-Packed` |
+| `overview` | text | One-sentence description |
+| `rating` | decimal (0–10) | Approximate rating |
+| `runtime` | integer (minutes) | Duration |
+| `language` | text | Original language |
+
+Languages in the catalogue: English (104), Hindi (10), Japanese (4), Korean (3), French (2), Italian (2), Telugu (2), Mandarin (1), Portuguese (1), Spanish (1).
+
+> **Data provenance: please read.** The catalogue is **hand-curated for educational use and is not verified.** Titles, release years, directors, and cast refer to real films. The ratings, runtimes, keywords, moods, and descriptions were written from general knowledge for this project. They are **approximate** and have **not** been checked against an authoritative source such as IMDb or TMDB. The same note is returned by `GET /api/dataset` and shown in the app footer. The automated tests use a separate, clearly **synthetic** seven-movie fixture.
+
+**Data cleaning.** The loader never invents values:
+
+* Rows missing a valid id, title, year (1880–2100), or rating (0–10) are dropped and logged by reason.
+* Missing optional fields get explicit empty values. Genres, moods, keywords, and cast become empty lists. Director and language become "Unknown", and the overview becomes empty.
+* An unknown runtime is stored as 0 and shown as "Runtime —".
+* Duplicate ids, and duplicate title-and-year pairs, are removed.
+
+## 10. Folder Structure
 
 ```
 CineMatch-AI/
 ├── backend/
 │   ├── app/
-│   │   ├── config.py          # paths, weights, year decay, dataset provenance
+│   │   ├── main.py            # FastAPI app, startup, CORS
+│   │   ├── routes.py          # REST endpoints
+│   │   ├── schemas.py         # Pydantic request/response models
+│   │   ├── recommender.py     # RecommendationEngine: features, scoring, ranking, explanations, search
 │   │   ├── data_loader.py     # CSV loading, validation, cleaning, de-duplication
-│   │   ├── recommender.py     # RecommendationEngine: features, caching, scoring, feedback, search
 │   │   ├── store.py           # SQLite: feedback + anonymous usage log
 │   │   ├── analytics.py       # analytics payload (dataset + logged usage)
-│   │   ├── schemas.py         # Pydantic request/response models
-│   │   ├── routes.py          # REST endpoints
-│   │   ├── main.py            # FastAPI app, startup, CORS
+│   │   ├── config.py          # weights, paths, cache settings, dataset provenance
 │   │   └── demo.py            # command-line demo with a sample input
-│   ├── data/movies.csv
-│   ├── tests/
-│   │   ├── conftest.py        # synthetic 7-movie fixture catalogue + API client
-│   │   ├── test_scoring.py    # unit tests of the maths
-│   │   ├── test_engine.py     # behaviour: exact/partial/no match, ranking, ties…
-│   │   └── test_api.py        # endpoints + invalid input on the real dataset
-│   ├── requirements.txt / requirements-dev.txt / pytest.ini
+│   ├── data/movies.csv        # the movie catalogue
+│   ├── tests/                 # pytest suites (synthetic fixture + real dataset)
+│   ├── requirements.txt       # runtime dependencies
+│   ├── requirements-dev.txt   # + pytest, httpx
+│   └── pytest.ini
 ├── frontend/
+│   ├── index.html
 │   ├── vite.config.js         # dev server + /api proxy (API_TARGET env var)
+│   ├── package.json
 │   └── src/
-│       ├── main.jsx           # BrowserRouter + AppProvider + styles
-│       ├── App.jsx            # route table
-│       ├── api/client.js      # backend API wrapper (typed errors)
-│       ├── context/AppContext.jsx  # options, persisted preferences, cached results
-│       ├── pages/             # Home, Preferences, Results, MovieDetails, HowItWorks, NotFound
-│       ├── components/
-│       │   ├── layout/        # Navbar (mobile menu), Footer, Layout (offline banner)
-│       │   ├── ui/            # Poster, ScoreRing, ChipSelector, MultiSelectDropdown,
-│       │   │                  # RangeSlider, Toggle, Feedback (spinner/empty/error/skeleton)
-│       │   ├── movies/        # RecommendationCard, MovieTile, ScoreBreakdown, FilterReport
-│       │   └── preferences/   # Stepper, KeywordInput, MovieSearch
-│       ├── utils/             # prefs (payload/validation), storage, genres, moods, tfidf demo
-│       ├── hooks/useDebounce.js
-│       └── styles/            # tokens, base, layout, components, pages (.css)
-├── docs/ALGORITHM.md          # detailed algorithm + worked example
-├── scripts/                   # Windows PowerShell setup/start helpers
+│       ├── main.jsx, App.jsx  # entry point and routes
+│       ├── api/client.js      # backend API wrapper
+│       ├── context/           # AppContext: options, preferences, results, feedback
+│       ├── pages/             # Home, Preferences, Results, MovieDetails, Browse,
+│       │                      # MyList, Analytics, HowItWorks, NotFound
+│       ├── components/        # layout/, ui/, movies/, preferences/, charts/
+│       ├── utils/             # preference validation, storage, formatting, teaching TF-IDF
+│       ├── hooks/             # useDebounce
+│       ├── styles/            # tokens, base, layout, components, pages, features (.css)
+│       └── __tests__/         # Vitest unit tests
+├── docs/
+│   ├── ALGORITHM.md           # detailed algorithm walkthrough
+│   └── screenshots/           # screenshots used in this README
+├── scripts/                   # Windows PowerShell setup / start helpers
 └── README.md
 ```
 
-## 4. Dataset
+## 11. Installation Instructions
 
-`backend/data/movies.csv` contains 130 movies across 19 genres, 15 moods, and 10 languages.
+**Prerequisites**
 
-> **Provenance: please read.** The catalogue is **hand-curated for educational use and is not verified.** Titles, release years, directors, and cast refer to real films. The ratings, runtimes, keywords, moods, and one-sentence descriptions were written from general knowledge for this project. They are **approximate** and have **not** been checked against an authoritative source such as IMDb or TMDB. Do not cite them as factual. The same note is returned by `GET /api/dataset` and shown in the app footer. The automated tests use a separate, clearly **synthetic** 7-movie fixture (`tests/conftest.py`).
+* **Python 3.10 or newer** ([python.org](https://www.python.org/downloads/))
+* **Node.js 20 or newer** ([nodejs.org](https://nodejs.org/))
+* Windows PowerShell (the commands below use it)
 
-| Required field | Column | Type | Example |
-|---|---|---|---|
-| Unique movie ID | `movie_id` | int | `6` |
-| Movie title | `title` | string | `Inception` |
-| Genre | `genres` | pipe list | `Science Fiction\|Action\|Thriller` |
-| Description | `overview` | string | `A thief who steals secrets…` |
-| Release year | `year` | int | `2010` |
-| Language | `language` | string | `English` |
-| Duration | `runtime` | int (minutes) | `148` |
-| Rating | `rating` | float 0–10 (approx.) | `8.8` |
-| Keywords | `keywords` | pipe list | `dreams\|heist\|reality` |
-| Mood or theme | `moods` | pipe list | `Mind-Bending\|Action-Packed` |
-| *(extra)* | `director`, `cast` | string, pipe list | used only in "More like this" explanations |
+Clone the repository:
 
-The loader checks that the required columns exist, coerces types, removes duplicate labels inside list fields, and drops duplicate movies (same `movie_id`, or same title and year).
-
-**Missing values are never invented.**
-
-* **Dropped rows:** a row is dropped (and logged by reason) when it is missing a valid `movie_id`, `title`, `year` (1880–2100), or `rating` (0–10). These fields identify, filter, or rank a movie.
-* **Filled fields:** missing optional fields get explicit empty values. Genres, moods, keywords, and cast become empty lists. Director and language become `Unknown`, and the overview becomes empty.
-* **Unknown runtime:** a missing or non-positive runtime becomes `0`, which the UI shows as "Runtime —".
-* **No usable rows:** a dataset with no valid rows fails at startup with a clear error.
-
-## 5. Recommendation algorithm (summary)
-
-`docs/ALGORITHM.md` has the full derivation and a worked example.
-
-| Component | Feature vectors | Score in [0, 1] | Default weight |
-|---|---|---|---|
-| Genre | multi-hot user vs. movie | cosine = \|U∩M\| / √(\|U\|·\|M\|) | 0.30 |
-| Keyword | TF-IDF of keywords + description | cosine ÷ best cosine in catalogue | 0.25 |
-| Mood | multi-hot user vs. movie | cosine | 0.20 |
-| Language | one-hot | 1 if preferred, else 0 | 0.15 |
-| Year | release year | 1 inside range, −1/20 per year outside | 0.10 |
-
-```
-base  = Σ w'_c · s_c        where  w'_c = w_c / Σ_{active} w_k   (only components the user set)
-score = clip(base + feedback_adjustment, 0, 1)      (adjustment = 0 without saved feedback)
+```powershell
+git clone https://github.com/SRBaggari/CineMatch-AI.git
+cd CineMatch-AI
 ```
 
-* **Comparable components:** every component is in [0, 1], with 1 meaning a perfect match. Raw TF-IDF cosines are small (rarely above 0.5), so the keyword score is max-normalised: the best text match in the catalogue scores 1. The raw cosine is still returned.
-* **Hard filters:** minimum rating always applies. The year range and languages become hard filters only when `strict_years` or `strict_languages` is set. A preference used as a hard filter stops counting as a score component (it would be 1.0 for every remaining movie), unless it is the only preference given.
-* **Ranking:** liked and excluded movies are removed, along with movies scoring 0 (they match nothing). The rest are sorted by **score ↓, rating ↓, movie_id ↑**, so ties always resolve the same way. The top `top_n` (default 10) are returned.
-* **No match:** the response is still `200`. It has an empty list, a `message` naming the filter that removed everything, and a `filter_report` showing how many movies survived each step.
-* **Score meaning:** the score is a weighted similarity for **ranking**. It is **not** a calibrated probability that the user will like the movie, and the UI shows it as a 0–1 relevance score, not a percentage.
+**One-step setup (recommended).** This creates the Python virtual environment, installs the backend packages, and installs the frontend packages:
 
-## 6. API reference
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1
+```
 
-Interactive docs are at **http://127.0.0.1:8000/docs** when the backend is running.
+You can also follow sections 12 and 13 to set up each part by hand.
+
+## 12. Backend Setup
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+```
+
+`requirements.txt` holds the runtime packages: FastAPI, Uvicorn, Pydantic, Pandas, NumPy, scikit-learn, and SciPy. `requirements-dev.txt` adds pytest and httpx for testing.
+
+**Optional environment variables**
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `CINEMATCH_DB_PATH` | `backend/data/cinematch.db` | SQLite file for feedback and usage logs |
+| `CINEMATCH_CACHE_DIR` | `backend/data/.cache` | Disk cache for fitted features (empty string disables it) |
+
+Both the database and the cache are created automatically and are ignored by git.
+
+## 13. Frontend Setup
+
+```powershell
+cd frontend
+npm install
+```
+
+During development the frontend calls relative `/api/...` URLs, and Vite proxies them to the backend. To point the proxy at a different backend port, set `API_TARGET` before starting the dev server:
+
+```powershell
+$env:API_TARGET = "http://127.0.0.1:8001"
+```
+
+## 14. How to Run the Project
+
+**Option A: one command (two windows open)**
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-all.ps1
+```
+
+**Option B: two terminals**
+
+```powershell
+# Terminal 1: backend (http://127.0.0.1:8000, interactive API docs at /docs)
+cd backend
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+
+# Terminal 2: frontend (http://localhost:5173)
+cd frontend
+npm run dev
+```
+
+Open **http://localhost:5173** in your browser.
+
+**If port 8000 is already in use**, run the backend on another port and point the frontend at it:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-all.ps1 -Port 8001
+```
+
+**Command-line demo:** this prints a sample input, its score components, and the ranked results without starting the web app:
+
+```powershell
+cd backend
+.\.venv\Scripts\python.exe -m app.demo
+```
+
+**Production build of the frontend:**
+
+```powershell
+cd frontend
+npm run build      # output in frontend/dist
+npm run preview    # serves the build on http://localhost:4173 (still proxies /api)
+```
+
+## 15. API Documentation
+
+When the backend is running, interactive Swagger documentation is available at **http://127.0.0.1:8000/docs**.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| GET | `/api/health` | Engine status |
-| GET | `/api/dataset` | Catalogue size, vocabulary, and provenance note |
+| GET | `/api/health` | Service status and number of movies loaded |
+| GET | `/api/dataset` | Catalogue size, vocabulary size, and provenance note |
 | GET | `/api/preferences/options` | Available genres, moods, languages, popular keywords, year and rating ranges, default weights |
-| GET | `/api/movies?search=&genre=&language=&limit=&offset=` | Paginated movie list: `{total, limit, offset, items}` |
-| GET | `/api/movies/{id}` | Movie details (404 if unknown) |
-| GET | `/api/movies/{id}/similar?top_n=` | Item-to-item similarity |
-| POST | `/api/movies/{id}/explain` | Score, components, reasons, and rank of **one** movie for the given preferences (same body as `/recommendations`); `rank` is `null` and `filtered_by` lists the reason when a hard filter removes it |
-| POST | `/api/recommendations` | Ranked, explained recommendations (logged to the local usage table) |
-| POST | `/api/movies/search` | Title search + genre / language / year filters; `sort`: `relevance`, `rating`, `year`, `title`; optional `preferences` makes relevance = match score |
-| GET | `/api/feedback` | Saved likes, dislikes, and favourites with movie details |
-| PUT | `/api/feedback/{id}` | `{"reaction": "like" \| "dislike" \| null, "favorite": true \| false}`; omitted fields are unchanged |
-| DELETE | `/api/feedback/{id}`, `/api/feedback` | Clear one movie's feedback, or all of it |
-| GET | `/api/analytics` | Catalogue distributions, logged usage (selected genres, score distribution), feedback counts, cache stats |
+| GET | `/api/movies?search=&genre=&language=&limit=&offset=` | Paginated movie list |
+| GET | `/api/movies/{id}` | Movie details |
+| GET | `/api/movies/{id}/similar?top_n=` | Item-to-item similar movies |
+| POST | `/api/movies/search` | Title search with genre, language, and year filters; sort by `relevance`, `rating`, `year`, or `title` |
+| POST | `/api/recommendations` | Ranked, explained recommendations |
+| POST | `/api/movies/{id}/explain` | Score, rank, and explanation of **one** movie for the given preferences |
+| GET | `/api/feedback` | Saved likes, dislikes, and favourites |
+| PUT | `/api/feedback/{id}` | Set a reaction (`like` / `dislike` / `null`) and/or `favorite` (true/false) |
+| DELETE | `/api/feedback/{id}` · `/api/feedback` | Clear one movie's feedback, or all of it |
+| GET | `/api/analytics` | Catalogue distributions, logged usage, and feedback counts |
 
-Request (all fields optional, but at least one preference is required; unknown fields are rejected):
+**`POST /api/recommendations`: request body.** Every field is optional, but at least one preference is required:
+
+| Field | Type | Notes |
+|---|---|---|
+| `genres`, `languages`, `moods`, `keywords` | list of strings (max 20) | Unknown genres, moods, or languages return 422 |
+| `liked_movie_ids`, `exclude_movie_ids` | list of ids | "Movies you love" seed the profile and are excluded from results |
+| `year_min`, `year_max` | integer | Preferred release-year range |
+| `min_rating` | number 0–10 | Always a hard filter |
+| `strict_years`, `strict_languages` | boolean | Turn the year range or languages into hard filters |
+| `top_n` | integer 1–50 | Default 10 |
+| `weights` | object | `genre`, `keyword`, `mood`, `language`, `year` (non-negative; re-normalised) |
+| `use_feedback` | boolean | Default `true`; apply saved likes, dislikes, and favourites |
+
+**Response.** The response contains `recommendations` (see section 17). It also includes `profile` (the effective weights, active components, and any genres or moods inferred from liked movies), a `filter_report` (movies remaining after each filter), `message` (an explanation when the list is empty), and `warnings`.
+
+**Errors.** Validation problems return **422** with a readable `detail`. Examples include empty preferences, out-of-range values, `year_min > year_max`, unknown labels or ids, unknown fields, and all-zero weights. A missing movie returns **404**.
+
+## 16. Example User Input
+
+The same request is used by `python -m app.demo` and in the screenshots:
 
 ```json
+POST /api/recommendations
 {
   "genres": ["Science Fiction", "Thriller"],
   "languages": ["English"],
@@ -183,140 +455,130 @@ Request (all fields optional, but at least one preference is required; unknown f
   "keywords": ["time travel", "dreams", "artificial intelligence"],
   "year_min": 1995,
   "year_max": 2020,
-  "min_rating": 7.5,
-  "strict_years": false,
-  "strict_languages": false,
-  "liked_movie_ids": [],
-  "exclude_movie_ids": [],
-  "top_n": 10,
-  "weights": {"genre": 0.30, "keyword": 0.25, "mood": 0.20, "language": 0.15, "year": 0.10},
-  "use_feedback": true
+  "min_rating": 7.5
 }
 ```
 
-Each recommendation contains `rank`, `movie_id`, `title`, `movie`, `base_score` (preferences only), `feedback_adjustment`, `score` (final), `feedback` (closest liked / disliked movie and similarities), `summary` (one-sentence explanation), `components` (each with `value`, `raw`, `weight`, `contribution`, and `active`), `matched` (genres, moods, language, keywords, year_in_range), `reasons`, `top_terms`, and `similar_to`. The response also carries `profile` (effective weights, active components, and inferred genres or moods), `filter_report`, `message`, and `warnings`.
+All five components are active, so the default weights are used unchanged: genre 0.30, keyword 0.25, mood 0.20, language 0.15, and year 0.10. The minimum rating removes 5 movies (130 → 125). Of the remaining movies, 124 match at least one preference.
 
-The API returns **422** for empty preferences, out-of-range values, `year_min > year_max`, unknown genres, moods, languages, or movie ids, blank labels, unknown fields, negative weights, and all-zero weights.
+## 17. Example Recommendations
 
-## 7. Sample output
+The output below was produced by the application for the input above (`python -m app.demo` and `POST /api/recommendations`):
 
-`.\.venv\Scripts\python.exe -m app.demo` (run from `backend/`) prints the following for the request above:
+| # | Movie | Genre | Language | Mood | Keyword (raw cosine) | Year | **Score** |
+|---|---|---|---|---|---|---|---|
+| 1 | Ex Machina | 0.817 | 1.000 | 0.577 | 0.460 (0.192) | 1.000 | **0.725** |
+| 2 | Inception | 0.817 | 1.000 | 0.577 | 0.425 (0.178) | 1.000 | **0.717** |
+| 3 | The Matrix | 0.500 | 1.000 | 0.577 | 0.479 (0.200) | 1.000 | **0.635** |
+| 4 | Terminator 2: Judgment Day | 0.500 | 1.000 | 0.000 | 1.000 (0.418) | 0.800 | **0.630** |
+| 5 | The Prestige | 0.707 | 1.000 | 0.577 | 0.000 (0.000) | 1.000 | **0.578** |
 
-```
-EFFECTIVE WEIGHTS  genre=0.30  language=0.15  mood=0.20  keyword=0.25  year=0.10
-FILTER REPORT {'total': 130, 'after_min_rating': 125, 'with_positive_score': 124}
+**How the top score is calculated (*Ex Machina*):**
 
- #  Title                         Score    genre  langu   mood  keywo   year  kw cos
- 1  Ex Machina                    0.725    0.817  1.000  0.577  0.460  1.000   0.192
- 2  Inception                     0.717    0.817  1.000  0.577  0.425  1.000   0.178
- 3  The Matrix                    0.635    0.500  1.000  0.577  0.479  1.000   0.200
- 4  Terminator 2: Judgment Day    0.630    0.500  1.000  0.000  1.000  0.800   0.418
- 5  The Prestige                  0.578    0.707  1.000  0.577  0.000  1.000   0.000
- …
-```
+$$0.30(0.817) + 0.15(1.000) + 0.20(0.577) + 0.25(0.460) + 0.10(1.000) = 0.245 + 0.150 + 0.116 + 0.115 + 0.100 = 0.725$$
 
-## 8. Running on Windows (PowerShell)
+**Explanation returned for #1:**
 
-**Prerequisites:** Python 3.10+ and Node.js 20+. This project was tested with Python 3.14 and Node 24.
+> *Recommended because you enjoy Science Fiction and Thriller movies, prefer English-language content, are in the mood for something Mind-Bending, selected artificial intelligence as favourite theme, and like movies released between 1995 and 2020.*
+>
+> Shared TF-IDF terms: *artificial intelligence, artificial, intelligence*
 
-### Option A: helper scripts
+Some details worth noticing:
 
-```powershell
-cd C:\Users\rinki\CineMatch-AI
-powershell -ExecutionPolicy Bypass -File .\scripts\setup.ps1      # one-time: venv + pip + npm
-powershell -ExecutionPolicy Bypass -File .\scripts\start-all.ps1  # backend + frontend windows
-```
+* **#4, Terminator 2:** it has the best text match (both *time travel* and *artificial intelligence*), so its keyword score is exactly 1.0. It was released in 1991, four years before the range, so its year score is 1 − 4/20 = 0.8, and its summary leaves the year out.
+* **#5, The Prestige:** it has no keyword match, and its explanation does not claim one.
 
-Open **http://localhost:5173**.
+**Similar movies to *Ex Machina*** (item-to-item cosine): Gravity (0.587), The Prestige (0.570), Gone Girl (0.542).
 
-### Option B: manual commands
+## 18. Testing Instructions
 
 ```powershell
-# Terminal 1: backend
-cd C:\Users\rinki\CineMatch-AI\backend
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+# Backend: unit, engine, API, and regression tests
+cd backend
+.\.venv\Scripts\python.exe -m pytest -v
 
-# Terminal 2: frontend
-cd C:\Users\rinki\CineMatch-AI\frontend
-npm install
-npm run dev
-```
-
-### Tests and demo
-
-```powershell
-cd C:\Users\rinki\CineMatch-AI\backend
-.\.venv\Scripts\python.exe -m pytest -v      # 138 backend tests
-.\.venv\Scripts\python.exe -m app.demo       # sample input + scored, ranked output
-
-cd C:\Users\rinki\CineMatch-AI\frontend
-npm test                                     # 22 Vitest unit tests
-```
-
-### If port 8000 is busy
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\start-all.ps1 -Port 8001
-# or manually:
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8001   # backend
-$env:API_TARGET = "http://127.0.0.1:8001"; npm run dev                      # frontend
-```
-
-### Production build of the frontend
-
-```powershell
+# Frontend: Vitest unit tests
 cd frontend
-npm run build      # outputs frontend/dist
-npm run preview    # serves the build on http://localhost:4173 (still proxies /api)
+npm test
 ```
 
-## 9. Frontend
+**What the tests cover**
 
-| Route | Page | What it does |
-|---|---|---|
-| `/` | Home | Hero ("Discover Movies Made for You"), Get Started, catalogue stats, featured highest-rated movie and a scrollable row (clearly labelled *not* personalised), How It Works preview |
-| `/preferences` | Preferences | 6-step wizard with a progress stepper: genre chips → language dropdown (+ strict toggle) → mood selection cards → themes and liked movies → era cards, dual year slider, rating slider, result-count dropdown → review with editable weights and **Generate My Recommendations** |
-| `/recommendations` | Results | Calls `POST /api/recommendations`. Shows the weights used, a filter funnel, a sort dropdown (default: match score), and cards with title, genres, rating, year, description, match score, reasons, and **View Details** |
-| `/movies/:id` | Movie details | Movie info, genres, moods, keywords, credits, a match explanation from `POST /api/movies/{id}/explain` (rank, reasons, component breakdown), and similar movies |
-| `/how-it-works` | How It Works | Beginner-friendly explanations of content-based filtering, TF-IDF, cosine similarity, weighted matching, and ranking, with live mini-demos |
-
-* **Data:** every personalised result comes from the backend. Nothing is hard-coded. The How It Works demos use small labelled teaching examples.
-* **Persistence:** preferences are saved to `localStorage` (`cinematch.preferences.v2`) and checked against the current catalogue on load. If storage is unavailable, the app still works.
-* **States:** skeleton loaders while scoring, an offline banner with retry when the backend is unreachable, error panels with retry, and empty states for no preferences, no matches (with the filter funnel), and unknown movie or page.
-* **Responsive:** tested at 1440 px desktop, 820 px tablet, and 390 px phone widths with no horizontal scrolling. On narrow screens the navbar collapses to a menu.
-* **Design:** black and charcoal surfaces, a purple-to-blue gradient accent, glass panels, rounded cards, and hover lift animations. Animations are reduced when the OS asks for reduced motion. Posters are generated from genre colours, with no external image service.
-
-| `/browse` | Browse | Title search, genre and language dropdowns, release-year slider, sort by relevance / rating / newest / title, optional "rank by my preferences" with match-score badges, pagination |
-| `/my-list` | My List | Favourites, liked, and disliked movies, with buttons to change or clear them |
-| `/analytics` | Analytics | Stat tiles, genre distribution, most-selected genres, score distribution, rating and language distributions, most-recommended movies, engine cache stats; each chart has hover tooltips and a table view |
-
-## 10. Feedback, search, analytics, and performance
-
-**Explanations.** Every recommendation has a `summary` sentence built only from attributes that actually matched, ordered by how much each contributed. For example: *"Recommended because you selected serial killer as favourite theme, enjoy Crime and Thriller movies, prefer English-language content, and are in the mood for something Dark."* A genre or language you chose that the movie doesn't have never appears. If nothing matched, the summary says so.
-
-**Feedback.** Like, dislike, and favourite are stored in SQLite (`backend/data/cinematch.db`, git-ignored, one local profile). With `use_feedback` on (the default):
-
-```
-adjustment = 0.15 × (max item-similarity to a liked or favourite movie − max item-similarity to a disliked movie)
-score      = clip(base_score + adjustment, 0, 1)
-```
-
-* `base_score` (preferences) and `feedback_adjustment` are separate fields, and the UI shows them separately ("Preference 0.83 − feedback 0.02 = 0.82").
-* A movie never boosts itself; disliked movies are hidden (`filter_report.after_dislikes`).
-* Feedback only re-ranks movies that already match a preference (`base_score > 0`), so it cannot pull in unrelated titles.
-* Switching feedback off (`use_feedback: false`, or the toggle on the results page) restores the preference-only ranking exactly.
-
-**Analytics.** `/api/analytics` reports catalogue figures from the CSV, plus usage from the local log. The usage section covers explicit genre, mood, and language selections per `/recommendations` call, and the final scores of every movie served. With no requests logged, the usage section is empty (zeros) and says so. Nothing is estimated. Searches and explanations are not logged.
-
-**Performance.**
-
-| Optimisation | Effect (measured on this machine, 130 movies) |
+| Suite | Covers |
 |---|---|
-| Fitted encoders, TF-IDF matrix, and item-similarity matrix cached on disk (`backend/data/.cache`), keyed by a SHA-256 of the dataset + pipeline settings; rebuilt only when the data changes | No TF-IDF re-fit on restart; startup 61 ms → 40 ms |
-| In-memory LRU cache (256 entries) of component scores per preference set; `min_rating` and `top_n` are applied fresh, so filters stay correct | Repeat recommendation 5.4 ms → 1.4 ms; per-movie explanation 5.4 ms → 0.5 ms |
-| LRU cache of keyword TF-IDF vectors | Repeated themes skip `vectorizer.transform` |
-| Precomputed row norms, serialised movies, and keyword tokens; vectorised year scoring; explanation terms read straight from the CSR arrays | Response building about 4× faster |
+| `tests/test_scoring.py` | Pure maths: set cosine, year score, weight normalisation, token handling |
+| `tests/test_engine.py` | Exact, partial, and no matches; empty and invalid preferences; duplicates; ranking; determinism; tie-breaking |
+| `tests/test_features.py` | Explanation summaries, feedback adjustment, search and filters, similar movies, caching |
+| `tests/test_store_and_api_features.py` | SQLite store, feedback / search / analytics endpoints |
+| `tests/test_api.py` | Endpoints and invalid input against the real dataset |
+| `tests/test_audit_regressions.py` | Missing-value datasets, user scenarios, concurrency, and regressions found during QA |
+| `frontend/src/__tests__/` | Preference validation, active-weight rules, API error handling, the teaching TF-IDF maths |
 
-Tests cover cache hits and misses, a cache hit that still applies a new `min_rating`, no re-fit when a valid disk cache exists, invalidation when data changes, and recovery from a corrupt cache file.
+Engine tests use a small **synthetic** seven-movie catalogue with hand-checkable properties. For example, three movies with identical content but different ratings and ids verify the tie-breaking order. API tests use a temporary database, so they never touch your saved feedback.
+
+When this README was written, the suites contained 138 backend tests and 22 frontend tests, and all of them passed. Run the commands above to verify on your machine.
+
+## 19. Screenshots
+
+All screenshots were captured from the running application. The analytics screenshot shows the usage logged during that capture session (three recommendation requests).
+
+| | |
+|---|---|
+| **Home**<br>![Home](docs/screenshots/01-home.jpg) | **Preferences: mood step**<br>![Preferences](docs/screenshots/02-preferences.jpg) |
+| **Recommendations**<br>![Recommendations](docs/screenshots/03-recommendations.jpg) | **Match explanation (movie details)**<br>![Match explanation](docs/screenshots/04-match-explanation.jpg) |
+| **Similar movies**<br>![Similar movies](docs/screenshots/05-similar-movies.jpg) | **Browse: search & filters**<br>![Browse](docs/screenshots/06-browse.jpg) |
+| **Analytics dashboard**<br>![Analytics](docs/screenshots/07-analytics.jpg) | **How It Works: interactive cosine demo**<br>![How it works](docs/screenshots/08-how-it-works.jpg) |
+
+**Mobile (390 px wide)**
+
+<img src="docs/screenshots/09-mobile.jpg" alt="Mobile recommendations" width="300">
+
+## 20. Challenges and Solutions
+
+| Challenge | Solution |
+|---|---|
+| **Scores on different scales.** Raw TF-IDF cosines rarely exceed 0.5, while genre and mood cosines reach 1, so the keyword weight had little effect. | Max-normalise the keyword score over the catalogue, so the best text match scores 1. The raw cosine is still reported in the API. |
+| **Multi-word themes matched too loosely.** Treated as separate words, "time travel" matched any description mentioning "time". | Add each keyword as a single joined token (`timetravel`, weighted twice) for exact concept matching, while also keeping the raw words. |
+| **Strict filters inflated scores.** When "only these languages" is on, every remaining movie scores 1.0 on language. That raised scores and let movies matching nothing else rank. | Switch off the scoring of a component when it is used as a hard filter, unless it is the only preference. |
+| **Ties must be deterministic.** Equal scores could come out in any order. | Round scores, then sort by score, rating, and movie id. Dedicated tests check the order. |
+| **Feedback could hide the reason for a pick.** Mixing likes into one number would make results hard to explain. | Keep `base_score` and `feedback_adjustment` separate, bound the adjustment to ±0.15, and only re-rank movies that already match a preference. |
+| **Messy data.** Missing titles or years were silently turned into "nan" or 0. | Validate on load: drop rows missing identity or ranking fields, give optional fields explicit empty values, and log what was dropped. Covered by regression tests. |
+| **Speed.** Profiling showed most request time was spent building explanations, not scoring. | Cache fitted features on disk and component scores in memory, precompute per-movie data, and read sparse TF-IDF rows directly. |
+| **Bugs that only appear in a real browser.** One example: an effect returning the Promise from `window.scrollTo()` crashed every page in Edge. | Test end to end in a real browser at desktop, tablet, and phone widths, including taking the backend offline mid-session. |
+| **Avoiding misleading numbers.** A "95% match" reads like a probability. | Show the score as a 0–1 relevance score, explicitly labelled as not a probability. |
+
+## 21. Limitations
+
+* **Small, unverified catalogue.** There are 130 hand-curated movies with approximate metadata (see the provenance note in section 9). Results can only be as good as the catalogue.
+* **Vocabulary, not meaning.** TF-IDF matches words, so *spaceship* and *starship* are unrelated features. Synonyms and paraphrases are not understood.
+* **Weights set by judgement.** The default weights, the 20-year decay, and the ±0.15 feedback bound were chosen by reasoning, not learned from user behaviour.
+* **No offline evaluation metrics.** The project has no ground-truth user ratings, so no accuracy, precision, or recall figures are reported.
+* **Single local profile.** There are no user accounts. Feedback and usage logs belong to whoever uses the installation.
+* **"More of the same".** Content-based filtering tends to recommend items similar to what you already chose, and there is no diversity re-ranking yet.
+* **Generated posters.** Posters are produced from genre colours rather than real artwork, because the project uses no external image services.
+
+## 22. Future Enhancements
+
+* Semantic text matching with sentence embeddings to capture meaning and synonyms, alongside TF-IDF.
+* Learning component weights from collected feedback, and evaluating with held-out ratings (precision@k, NDCG).
+* A diversity-aware re-ranking step, such as Maximal Marginal Relevance (MMR).
+* Hybrid recommendations: adding collaborative filtering once multiple user profiles exist.
+* User accounts with separate profiles and feedback.
+* A larger, verified dataset imported from an open, licensed source.
+* An end-to-end browser test suite in CI.
+
+## 23. Conclusion
+
+CineMatch AI shows that a transparent, mathematically grounded recommender can be built without external AI services or user-history data.
+
+* **Representation:** each movie is a set of feature vectors.
+* **Text:** keywords and descriptions are weighted with TF-IDF.
+* **Similarity:** taste and content are compared with cosine similarity.
+* **Scoring:** the signals are combined with normalised, configurable weights.
+* **Ranking:** results are ordered deterministically.
+
+The system meets every objective of *Project 3: AI Recommendation Logic*. Most importantly, it **explains every recommendation** in plain language and in numbers, so a user can see exactly why a movie was suggested. It also leaves clear paths for future work: semantic matching, learned weights, and evaluation with real users.
+
+---
+
+*Built for the DecodeLabs Artificial Intelligence Industrial Training programme.*
